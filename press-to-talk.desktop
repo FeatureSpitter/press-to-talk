@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Press to Talk
+GenericName=Voice Dictation
+Comment=Hold Ctrl+M to record, release to copy transcription to clipboard
+Exec=/home/milhas/projectos/press-to-talk/launch.sh
+Path=/home/milhas/projectos/press-to-talk
+Icon=audio-input-microphone
+Terminal=false
+Categories=Utility;Audio;
+Keywords=dictation;voice;whisper;transcription;speech;
+StartupNotify=true
+X-GNOME-Autostart-enabled=false

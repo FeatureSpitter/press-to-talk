@@ -1,0 +1,22 @@
+[project]
+name = "press-to-talk"
+version = "0.1.0"
+description = "Local push-to-talk transcription with faster-whisper on Linux"
+requires-python = ">=3.12"
+dependencies = [
+    "faster-whisper>=1.2.1",
+    "numpy>=2.5.1",
+    "pynput>=1.8.2",
+    "sounddevice>=0.5.5",
+]
+
+[project.scripts]
+press-to-talk = "press_to_talk:main"
+
+[tool.uv]
+python-preference = "only-system"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
