@@ -469,12 +469,22 @@ class TestHotkeyDetector:
         assert len(presses) == 1
         assert len(releases) == 0
 
-    def test_release_stops_recording(self, mock_pynput_key):
+    def test_release_ctrl_stops_recording(self, mock_pynput_key):
         detector, presses, releases, Key, KeyCode = self._make_detector(mock_pynput_key)
         detector.handle_press(Key.ctrl_r)
         detector.handle_press(KeyCode("M"))
+        detector.handle_release(Key.ctrl_r)
+        assert len(presses) == 1
+        assert len(releases) == 1
+
+    def test_release_m_keeps_recording(self, mock_pynput_key):
+        detector, presses, releases, Key, KeyCode = self._make_detector(mock_pynput_key)
+        detector.handle_press(Key.ctrl_l)
+        detector.handle_press(KeyCode("m"))
         detector.handle_release(KeyCode("m"))
         assert len(presses) == 1
+        assert len(releases) == 0
+        detector.handle_release(Key.ctrl_l)
         assert len(releases) == 1
 
     def test_right_ctrl_works(self, mock_pynput_key):

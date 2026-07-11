@@ -2,8 +2,8 @@
 """
 Press-to-Talk Local Transcription Tool
 
-Hold Ctrl+M to record speech. Release to transcribe locally with faster-whisper
-and copy the result to the clipboard. A small Gtk overlay shows status without
+Hold Ctrl+M to start recording, keep Ctrl held while speaking, release Ctrl to
+transcribe locally with faster-whisper and copy the result to the clipboard. A small Gtk overlay shows status without
 stealing focus.
 
 Setup:
@@ -96,7 +96,7 @@ class AppConfig:
 
 def parse_args(argv: Optional[list[str]] = None) -> AppConfig:
     parser = argparse.ArgumentParser(
-        description="Hold Ctrl+M to record, release to transcribe and copy to clipboard."
+        description="Press Ctrl+M to record, keep Ctrl held, release Ctrl to transcribe."
     )
     parser.add_argument(
         "--model",
@@ -256,7 +256,10 @@ class ClipboardManager:
 
 
 class HotkeyDetector:
-    """Detect hold-to-talk for Ctrl+M (left or right Ctrl).
+    """Detect hold-to-talk triggered by Ctrl+M (left or right Ctrl).
+
+    Ctrl+M starts recording. While recording, only Ctrl must stay held — M can
+    be released. Releasing Ctrl stops recording and triggers transcription.
 
     On X11, grabs Ctrl+M at the display server so other apps never receive it.
     Key releases are detected via both pynput (XRecord) and the X11 grab event
@@ -284,7 +287,7 @@ class HotkeyDetector:
         self._on_quit = on_quit
         self._ctrl_held = False
         self._m_held = False
-        self._combo_active = False
+        self._recording = False
         self._listener = None
         self._x11_thread = None
         self._x11_running = False
@@ -316,33 +319,35 @@ class HotkeyDetector:
             return key.char.lower() == "q"
         return False
 
-    def _update_combo(self) -> None:
-        should_be_active = self._ctrl_held and self._m_held
-        if should_be_active and not self._combo_active:
-            self._combo_active = True
+    def _try_start_recording(self) -> None:
+        if self._ctrl_held and self._m_held and not self._recording:
+            self._recording = True
             self._on_press()
-        elif not should_be_active and self._combo_active:
-            self._combo_active = False
+
+    def _try_stop_recording(self) -> None:
+        if self._recording and not self._ctrl_held:
+            self._recording = False
             self._on_release()
 
     def handle_press(self, key) -> None:
         with self._lock:
             if self._is_ctrl(key):
                 self._ctrl_held = True
+                self._try_start_recording()
             elif self._is_m(key):
                 self._m_held = True
+                self._try_start_recording()
             elif self._ctrl_held and self._is_q(key) and self._on_quit:
                 self._on_quit()
                 return
-            self._update_combo()
 
     def handle_release(self, key) -> None:
         with self._lock:
             if self._is_ctrl(key):
                 self._ctrl_held = False
+                self._try_stop_recording()
             elif self._is_m(key):
                 self._m_held = False
-            self._update_combo()
 
     @staticmethod
     def _control_modifier_masks() -> list[int]:
@@ -494,7 +499,7 @@ class HotkeyDetector:
             on_release=self.handle_release,
         )
         self._listener.start()
-        logger.info("Hotkey listener active (hold Ctrl+M)")
+        logger.info("Hotkey listener active (Ctrl+M to start, release Ctrl to stop)")
 
     def start(self) -> None:
         if self._listener is not None or self._x11_thread is not None:
@@ -693,7 +698,7 @@ class TrayIcon:
     """System tray icon with a Quit menu item."""
 
     ICON_NAME = "audio-input-microphone"
-    TOOLTIP = "Press to Talk\nHold Ctrl+M to record, release to copy"
+    TOOLTIP = "Press to Talk\nCtrl+M to start, release Ctrl to copy"
 
     def __init__(
         self,
