@@ -9,10 +9,13 @@ Runs in the background with a system tray icon and a small status popup in the b
 ## Features
 
 - **Hotkey recording**: Ctrl+M to start; hold Ctrl while speaking (M can be released)
+- **File transcription**: Ctrl+N to pick an audio file and transcribe it to the clipboard
 - **Local transcription**: Whisper model (default `large-v3-turbo`) on NVIDIA CUDA
 - **Clipboard**: transcribed text copied automatically via `xclip`
+- **Auto-paste**: optional Ctrl+V into the focused window after transcription
+- **Settings dialog**: pick recording device, test mic levels, toggle auto-paste
 - **Language detection**: Portuguese and English (auto-detect)
-- **X11 key suppression**: Ctrl+M is blocked from other apps while the service runs
+- **X11 key suppression**: Ctrl+M/N/Q blocked from other apps while the service runs
 - **Single instance**: launching again replaces the previous instance
 
 ## Quick install (Linux Mint)
@@ -54,16 +57,29 @@ The venv needs `--system-site-packages` so GTK bindings from the system are avai
 
 Or from the **Start Menu** → **Press to Talk**.
 
+### Record from microphone
+
 1. Wait for the model to load (“Loading model...”).
 2. Press **Ctrl+M** to start recording.
 3. Keep **Ctrl** held while speaking (you can release M).
 4. Release **Ctrl** → transcribes and copies to the clipboard.
-5. Paste with Ctrl+V wherever you need.
+5. Paste with Ctrl+V wherever you need (or enable auto-paste in Settings).
 
-Other shortcuts:
+### Transcribe an audio file
 
-- **Ctrl+Q** (while Ctrl is held): quit
-- **Right-click tray icon** → **Settings** or **Quit**
+1. Press **Ctrl+N** (left or right Ctrl).
+2. Pick a file in the dialog (wav, mp3, flac, ogg, opus, m4a, wma, aac, webm, mp4, etc.).
+3. Click **Transcribe** → same pipeline as mic recording: transcribe, copy to clipboard, optional auto-paste.
+
+### Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| **Ctrl+M** | Start recording (release Ctrl to stop and transcribe) |
+| **Ctrl+N** | Open file picker and transcribe selected audio |
+| **Ctrl+Q** | Quit (while Ctrl is held) |
+| **Tray → Settings** | Recording device, mic test, auto-paste |
+| **Tray → Quit** | Exit the app |
 
 ### Settings
 
@@ -75,7 +91,7 @@ Open **Settings** from the tray menu to:
 
 Settings are saved to `~/.config/press-to-talk/settings.json`.
 
-If no speech is detected (muted mic, low levels, etc.), the popup shows **“No speech detected”**.
+If no speech is detected (muted mic, low levels, empty file, etc.), the popup shows **“No speech detected”** or **“No speech in file”**.
 
 ### CLI options
 
@@ -106,7 +122,7 @@ cp ~/.local/share/applications/press-to-talk.desktop ~/.config/autostart/
 
 ## Microphone
 
-Check **System Settings → Sound → Input** (or `pavucontrol`) that the correct mic is selected and not muted. If the app records silence, you will see **“No speech detected”** instead of clipboard text.
+Check **System Settings → Sound → Input** (or `pavucontrol`) that the correct mic is selected and not muted. Use **Settings → Test microphone** to verify levels before recording. If the app records silence, you will see **“No speech detected”** instead of clipboard text.
 
 ## Tests
 
