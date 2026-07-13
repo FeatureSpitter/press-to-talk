@@ -1148,6 +1148,7 @@ class PressToTalkApp:
         self._busy = False
         self._model_ready = False
         self._should_quit = False
+        self._file_dialog_open = False
         self._gtk = None
 
     def _idle_add(self, callback: Callable[[], None]) -> None:
@@ -1267,20 +1268,37 @@ class PressToTalkApp:
                 )
             )
             return
-        if self._busy:
+        if self._busy or self._file_dialog_open:
             return
+        self._file_dialog_open = True
         self._idle_add(self._show_file_picker)
+
+    def _present_file_dialog(self, dialog) -> None:
+        """Raise the file picker above other windows and give it keyboard focus."""
+        Gtk = self._gtk
+        dialog.set_modal(True)
+        dialog.set_keep_above(True)
+        if Gtk is not None:
+            dialog.set_position(Gtk.WindowPosition.CENTER)
+        dialog.set_accept_focus(True)
+        dialog.set_focus_on_map(True)
+        dialog.show_all()
+        dialog.present()
 
     def _show_file_picker(self) -> bool:
         import gi
 
         gi.require_version("Gtk", "3.0")
-        from gi.repository import Gtk
+        from gi.repository import Gdk, Gtk
+
+        if self._gtk is None:
+            self._gtk = Gtk
 
         dialog = Gtk.FileChooserDialog(
             title="Select audio file to transcribe",
             action=Gtk.FileChooserAction.OPEN,
         )
+        dialog.set_type_hint(Gdk.WindowTypeHint.DIALOG)
         dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
         dialog.add_button("Transcribe", Gtk.ResponseType.OK)
 
@@ -1295,9 +1313,16 @@ class PressToTalkApp:
         all_filter.add_pattern("*")
         dialog.add_filter(all_filter)
 
-        response = dialog.run()
-        filepath = dialog.get_filename()
-        dialog.destroy()
+        filepath = None
+        response = Gtk.ResponseType.CANCEL
+        try:
+            self._present_file_dialog(dialog)
+            response = dialog.run()
+            if response == Gtk.ResponseType.OK:
+                filepath = dialog.get_filename()
+        finally:
+            dialog.destroy()
+            self._file_dialog_open = False
 
         if response == Gtk.ResponseType.OK and filepath:
             self._busy = True

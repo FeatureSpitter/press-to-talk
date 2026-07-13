@@ -1038,6 +1038,56 @@ class TestPressToTalkApp:
         assert pasted == [True]
         assert "Copied & pasted!" in overlay._record_call["texts"]
 
+    def test_file_dialog_only_one_at_a_time(
+        self, config, mock_sounddevice, mock_gtk, mock_whisper_model, mock_xclip
+    ):
+        app = self._make_app(
+            config, mock_sounddevice, mock_gtk, mock_whisper_model, mock_xclip
+        )
+        queued = []
+        app._idle_add = lambda cb: queued.append(cb)
+
+        app.on_file_transcribe()
+        assert app._file_dialog_open is True
+        assert len(queued) == 1
+
+        app.on_file_transcribe()
+        assert len(queued) == 1
+
+    def test_show_file_picker_clears_open_flag(
+        self, config, mock_sounddevice, mock_gtk, mock_whisper_model, mock_xclip, monkeypatch
+    ):
+        app = self._make_app(
+            config, mock_sounddevice, mock_gtk, mock_whisper_model, mock_xclip
+        )
+        app._file_dialog_open = True
+        app._gtk = MagicMock()
+        app._gtk.WindowPosition = SimpleNamespace(CENTER=0)
+
+        fake_dialog = MagicMock()
+        fake_dialog.run.return_value = 0
+
+        fake_gtk = MagicMock()
+        fake_gtk.FileChooserDialog.return_value = fake_dialog
+        fake_gtk.ResponseType = SimpleNamespace(CANCEL=0, OK=1)
+        fake_gtk.FileChooserAction = SimpleNamespace(OPEN=0)
+        fake_gtk.WindowPosition = SimpleNamespace(CENTER=0)
+        fake_gdk = MagicMock()
+        fake_gdk.WindowTypeHint = SimpleNamespace(DIALOG="dialog")
+
+        import sys
+
+        monkeypatch.setitem(sys.modules, "gi", MagicMock(require_version=lambda *_: None))
+        monkeypatch.setitem(
+            sys.modules,
+            "gi.repository",
+            SimpleNamespace(Gtk=fake_gtk, Gdk=fake_gdk),
+        )
+
+        app._show_file_picker()
+        assert app._file_dialog_open is False
+        fake_dialog.destroy.assert_called_once()
+
 
 SAMPLE_RATE = ptt.SAMPLE_RATE
 
