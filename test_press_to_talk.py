@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -43,10 +45,11 @@ def mock_sounddevice():
     captured = {"callback": None, "active": False, "chunks": []}
 
     class FakeStream:
-        def __init__(self, samplerate, channels, dtype, callback):
+        def __init__(self, samplerate, channels, dtype, callback, device=None):
             captured["samplerate"] = samplerate
             captured["channels"] = channels
             captured["dtype"] = dtype
+            captured["device"] = device
             captured["callback"] = callback
 
         def start(self):
@@ -335,6 +338,108 @@ class TestAudioRecorder:
         recorder.start()
         assert mock_sounddevice.InputStream.call_count == 1
 
+    def test_input_device_passed_to_stream(self, mock_sounddevice):
+        recorder = ptt.AudioRecorder(
+            input_device=5,
+            sounddevice_module=mock_sounddevice,
+        )
+        recorder.start()
+        assert mock_sounddevice.captured["device"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
+
+
+class TestSettings:
+    def test_settings_store_roundtrip(self, tmp_path):
+        store = ptt.SettingsStore(path=tmp_path / "settings.json")
+        settings = ptt.UserSettings(input_device=5, auto_paste=True)
+        store.save(settings)
+        loaded = store.load()
+        assert loaded == settings
+
+    def test_settings_store_defaults_on_missing_file(self, tmp_path):
+        store = ptt.SettingsStore(path=tmp_path / "missing.json")
+        assert store.load() == ptt.UserSettings()
+
+    def test_list_input_devices_includes_default(self):
+        sd = MagicMock()
+        sd.query_devices.return_value = [
+            {"name": "Output only", "max_input_channels": 0},
+            {"name": "USB Mic", "max_input_channels": 1},
+        ]
+        devices = ptt.list_input_devices(sd)
+        assert devices[0] == (None, "System default")
+        assert (1, "USB Mic") in devices
+
+    def test_apply_settings_updates_recorder(self, config, mock_sounddevice, mock_gtk, mock_whisper_model):
+        overlay, glib = mock_gtk
+        app = ptt.PressToTalkApp(
+            config=config,
+            overlay=overlay,
+            recorder=ptt.AudioRecorder(sounddevice_module=mock_sounddevice),
+            transcriber=ptt.Transcriber(config, whisper_model=mock_whisper_model),
+            settings_store=ptt.SettingsStore(path=Path(tempfile.mkdtemp()) / "settings.json"),
+            glib_module=glib,
+        )
+        app.apply_settings(ptt.UserSettings(input_device=3, auto_paste=True))
+        assert app.settings.input_device == 3
+        assert app.settings.auto_paste is True
+        assert app.recorder.input_device == 3
+
+    def test_mic_level_monitor_tracks_peak(self):
+        captured = {"callback": None}
+
+        class FakeStream:
+            def __init__(self, **kwargs):
+                captured["device"] = kwargs.get("device")
+                captured["callback"] = kwargs["callback"]
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        sd = MagicMock()
+        sd.InputStream.side_effect = lambda **kwargs: FakeStream(**kwargs)
+        monitor = ptt.MicLevelMonitor(sounddevice_module=sd)
+        monitor.start(device=2)
+        assert captured["device"] == 2
+        assert monitor.is_active
+
+        chunk = np.array([[0.0], [0.4], [0.2]], dtype=np.float32)
+        captured["callback"](chunk, len(chunk), None, None)
+        assert monitor.read_level() >= 0.4
+
+        monitor.stop()
+        assert not monitor.is_active
+        assert monitor.read_level() == 0.0
+
+    def test_mic_level_monitor_reports_start_error(self):
+        sd = MagicMock()
+        sd.InputStream.side_effect = OSError("Device unavailable")
+        monitor = ptt.MicLevelMonitor(sounddevice_module=sd)
+        monitor.start(device=99)
+        assert not monitor.is_active
+        assert monitor.error == "Device unavailable"
+
+    def test_level_hint_messages(self):
+        dialog = ptt.SettingsDialog(
+            settings=ptt.UserSettings(),
+            on_save=lambda _: None,
+            gtk_modules=object(),
+            glib_module=MagicMock(),
+        )
+        assert "Silent" in dialog._level_hint(0.0)
+        assert "Low" in dialog._level_hint(0.02)
+        assert "Good" in dialog._level_hint(0.2)
+
 
 # ---------------------------------------------------------------------------
 # Transcriber
@@ -394,6 +499,20 @@ class TestTranscriber:
         transcriber = ptt.Transcriber(config)
         with pytest.raises(RuntimeError, match="not loaded"):
             transcriber.transcribe(np.zeros(10, dtype=np.float32))
+
+    def test_transcribe_file_passes_path(self, config, mock_whisper_model):
+        transcriber = ptt.Transcriber(config, whisper_model=mock_whisper_model)
+        text = transcriber.transcribe_file("/tmp/test.mp3")
+        assert text == "Olá mundo"
+        args, kwargs = mock_whisper_model.transcribe.call_args
+        assert args[0] == "/tmp/test.mp3"
+        assert kwargs["beam_size"] == 5
+        assert kwargs["vad_filter"] is True
+
+    def test_transcribe_file_requires_loaded_model(self, config):
+        transcriber = ptt.Transcriber(config)
+        with pytest.raises(RuntimeError, match="not loaded"):
+            transcriber.transcribe_file("/tmp/test.wav")
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +636,32 @@ class TestHotkeyDetector:
         assert len(presses) == 2
         assert len(releases) == 1
 
+    def test_ctrl_n_triggers_file_transcribe(self, mock_pynput_key):
+        Key, KeyCode = mock_pynput_key
+        file_called = []
+
+        class FakeListener:
+            def __init__(self, on_press, on_release):
+                pass
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        detector = ptt.HotkeyDetector(
+            on_press=lambda: None,
+            on_release=lambda: None,
+            on_file_transcribe=lambda: file_called.append(True),
+            keyboard_listener_cls=FakeListener,
+            key_cls=Key,
+            use_x11_grab=False,
+        )
+        detector.handle_press(Key.ctrl_l)
+        detector.handle_press(KeyCode("n"))
+        assert len(file_called) == 1
+
     def test_ctrl_q_triggers_quit(self, mock_pynput_key):
         Key, KeyCode = mock_pynput_key
         quit_called = []
@@ -628,6 +773,7 @@ class TestOverlay:
 class TestTrayIcon:
     def test_quit_menu_item_calls_callback(self):
         quit_called = []
+        settings_called = []
 
         class FakeMenuItem:
             def __init__(self, label=""):
@@ -674,11 +820,15 @@ class TestTrayIcon:
 
         tray = ptt.TrayIcon(
             on_quit=lambda: quit_called.append(True),
+            on_settings=lambda: settings_called.append(True),
             gtk_modules=(FakeGtk, FakeIndicator),
         )
         tray.build()
-        quit_item = tray._menu.items[0]
+        settings_item = tray._menu.items[0]
+        quit_item = tray._menu.items[1]
+        settings_item._handler(settings_item)
         quit_item._handler(quit_item)
+        assert settings_called == [True]
         assert quit_called == [True]
 
 
@@ -848,6 +998,45 @@ class TestPressToTalkApp:
             threading.Event().wait(0.01)
 
         assert mock_xclip["text"] == "Olá mundo"
+
+    def test_auto_paste_after_transcription(
+        self, config, mock_sounddevice, mock_gtk, mock_whisper_model, mock_xclip, monkeypatch
+    ):
+        pasted = []
+
+        overlay, glib = mock_gtk
+        transcriber = ptt.Transcriber(config, whisper_model=mock_whisper_model)
+        transcriber._model = mock_whisper_model
+        store = ptt.SettingsStore(path=Path(tempfile.mkdtemp()) / "settings.json")
+        app = ptt.PressToTalkApp(
+            config=config,
+            overlay=overlay,
+            recorder=ptt.AudioRecorder(sounddevice_module=mock_sounddevice),
+            transcriber=transcriber,
+            clipboard=ptt.ClipboardManager(),
+            settings_store=store,
+            glib_module=glib,
+        )
+        app._model_ready = True
+        app.settings = ptt.UserSettings(auto_paste=True)
+        monkeypatch.setattr(
+            ptt.ClipboardManager,
+            "paste",
+            lambda self: pasted.append(True),
+        )
+
+        app.on_hotkey_press()
+        mock_sounddevice.emit_chunk(np.ones((800, 1), dtype=np.float32))
+        app.on_hotkey_release()
+
+        for _ in range(50):
+            if not app._busy:
+                break
+            threading.Event().wait(0.01)
+
+        assert mock_xclip["text"] == "Olá mundo"
+        assert pasted == [True]
+        assert "Copied & pasted!" in overlay._record_call["texts"]
 
 
 SAMPLE_RATE = ptt.SAMPLE_RATE
