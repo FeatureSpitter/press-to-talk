@@ -27,6 +27,7 @@ import os
 import select
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -178,6 +179,16 @@ def parse_args(argv: Optional[list[str]] = None) -> AppConfig:
         action="store_true",
         help="Load the model and exit (smoke test).",
     )
+    parser.add_argument(
+        "--transcribe-file",
+        metavar="PATH",
+        help="Transcribe an audio file and print the result to stdout (CLI mode).",
+    )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="Start headless socket server for ZapZap integration (load model once, serve many).",
+    )
     args = parser.parse_args(argv)
     config = AppConfig(
         model=args.model,
@@ -188,7 +199,7 @@ def parse_args(argv: Optional[list[str]] = None) -> AppConfig:
         xclip_path=shutil.which("xclip") or "xclip",
     )
     config.validate()
-    return config, args.check
+    return config, args.check, args.transcribe_file, args.serve
 
 
 class AudioRecorder:
@@ -349,19 +360,37 @@ class Transcriber:
             kwargs["language"] = self.config.language
         return kwargs
 
+    @staticmethod
+    def _join_segments(segments, pause_threshold: float = 1.5) -> str:
+        """Join segments, inserting paragraph breaks at natural pauses."""
+        parts: list[str] = []
+        prev_end = 0.0
+        for seg in segments:
+            text = seg.text
+            if not text:
+                continue
+            gap = seg.start - prev_end if prev_end > 0 else 0.0
+            if gap >= pause_threshold and parts:
+                parts.append("\n\n")
+                parts.append(text.strip())
+            else:
+                parts.append(text)
+            prev_end = seg.end
+        return "".join(parts).strip()
+
     def transcribe(self, audio: np.ndarray) -> str:
         if self._model is None:
             raise RuntimeError("Model is not loaded")
         if audio.size == 0:
             return ""
         segments, _info = self._model.transcribe(audio, **self._transcribe_kwargs())
-        return "".join(segment.text for segment in segments).strip()
+        return self._join_segments(segments)
 
     def transcribe_file(self, path: str) -> str:
         if self._model is None:
             raise RuntimeError("Model is not loaded")
         segments, _info = self._model.transcribe(path, **self._transcribe_kwargs())
-        return "".join(segment.text for segment in segments).strip()
+        return self._join_segments(segments)
 
 
 class ClipboardManager:
@@ -398,11 +427,10 @@ class HotkeyDetector:
 
     Ctrl+M starts recording. While recording, only Ctrl must stay held — M can
     be released. Releasing Ctrl stops recording and triggers transcription.
-    Ctrl+N opens the file transcription dialog.
 
-    On X11, grabs Ctrl+M and Ctrl+N at the display server so other apps never
-    receive them. Key releases are detected via both pynput (XRecord) and the
-    X11 grab event stream for redundancy.
+    On X11, grabs Ctrl+M at the display server so other apps never receive it.
+    Key releases are detected via both pynput (XRecord) and the X11 grab event
+    stream for redundancy.
     """
 
     CTRL_KEYS = frozenset()
@@ -412,7 +440,6 @@ class HotkeyDetector:
         on_press: Callable[[], None],
         on_release: Callable[[], None],
         on_quit: Optional[Callable[[], None]] = None,
-        on_file_transcribe: Optional[Callable[[], None]] = None,
         keyboard_listener_cls=None,
         key_cls=None,
         use_x11_grab: Optional[bool] = None,
@@ -425,7 +452,6 @@ class HotkeyDetector:
         self._on_press = on_press
         self._on_release = on_release
         self._on_quit = on_quit
-        self._on_file_transcribe = on_file_transcribe
         self._ctrl_held = False
         self._m_held = False
         self._recording = False
@@ -455,11 +481,6 @@ class HotkeyDetector:
             return key.char.lower() == "m"
         return False
 
-    def _is_n(self, key) -> bool:
-        if hasattr(key, "char") and key.char:
-            return key.char.lower() == "n"
-        return False
-
     def _is_q(self, key) -> bool:
         if hasattr(key, "char") and key.char:
             return key.char.lower() == "q"
@@ -483,9 +504,6 @@ class HotkeyDetector:
             elif self._is_m(key):
                 self._m_held = True
                 self._try_start_recording()
-            elif self._ctrl_held and self._is_n(key) and self._on_file_transcribe:
-                self._on_file_transcribe()
-                return
             elif self._ctrl_held and self._is_q(key) and self._on_quit:
                 self._on_quit()
                 return
@@ -509,7 +527,7 @@ class HotkeyDetector:
 
     def _x11_grab_combo_keys(
         self, display, grab_win
-    ) -> tuple[set[int], int, int, int]:
+    ) -> tuple[set[int], int, int]:
         import Xlib.X
         import Xlib.XK
 
@@ -518,7 +536,6 @@ class HotkeyDetector:
             display.keysym_to_keycode(Xlib.XK.XK_Control_R),
         }
         m_code = display.keysym_to_keycode(Xlib.XK.XK_m)
-        n_code = display.keysym_to_keycode(Xlib.XK.XK_n)
         q_code = display.keysym_to_keycode(Xlib.XK.XK_q)
 
         for mod in self._no_modifier_masks():
@@ -526,10 +543,10 @@ class HotkeyDetector:
                 self._x11_grab_key(grab_win, code, mod, "ctrl")
 
         for mod in self._control_modifier_masks():
-            for code, name in ((m_code, "m"), (n_code, "n"), (q_code, "q")):
+            for code, name in ((m_code, "m"), (q_code, "q")):
                 self._x11_grab_key(grab_win, code, mod, name)
 
-        return ctrl_codes, m_code, n_code, q_code
+        return ctrl_codes, m_code, q_code
 
     @staticmethod
     def _no_modifier_masks() -> list[int]:
@@ -560,16 +577,19 @@ class HotkeyDetector:
                 exc,
             )
 
-    def _x11_keycode_to_pynput(self, event, ctrl_codes, m_code, n_code, q_code):
+    def _x11_keycode_to_pynput(self, event, ctrl_codes, m_code, q_code):
         """Translate an X11 keycode to the equivalent pynput key object."""
         keycode = event.detail
         if keycode in ctrl_codes:
             return self._Key.ctrl_l
-        char_map = {m_code: "m", n_code: "n", q_code: "q"}
-        char = char_map.get(keycode)
-        if char is not None:
+        if keycode == m_code:
             try:
-                return self._keyboard.KeyCode.from_char(char)
+                return self._keyboard.KeyCode.from_char("m")
+            except Exception:
+                return None
+        if keycode == q_code:
+            try:
+                return self._keyboard.KeyCode.from_char("q")
             except Exception:
                 return None
         return None
@@ -596,13 +616,11 @@ class HotkeyDetector:
         grab_win.map()
         self._x11_grab_win = grab_win
 
-        ctrl_codes, m_code, n_code, q_code = self._x11_grab_combo_keys(
-            display, grab_win
-        )
+        ctrl_codes, m_code, q_code = self._x11_grab_combo_keys(display, grab_win)
         display.sync()
 
         logger.info(
-            "X11 key suppression active: Ctrl+M/N/Q blocked for other apps"
+            "X11 key suppression active: Ctrl+M/Q blocked for other apps"
         )
 
         while self._x11_running:
@@ -616,7 +634,7 @@ class HotkeyDetector:
                 if event.type not in (Xlib.X.KeyPress, Xlib.X.KeyRelease):
                     continue
                 key = self._x11_keycode_to_pynput(
-                    event, ctrl_codes, m_code, n_code, q_code
+                    event, ctrl_codes, m_code, q_code
                 )
                 if key is None:
                     continue
@@ -1008,7 +1026,7 @@ class SettingsDialog:
 
 
 class TrayIcon:
-    """System tray icon with Settings and Quit menu items."""
+    """System tray icon with Transcribe file, Settings, and Quit menu items."""
 
     ICON_NAME = "audio-input-microphone"
     TOOLTIP = "Press to Talk\nCtrl+M to start, release Ctrl to copy"
@@ -1017,6 +1035,7 @@ class TrayIcon:
         self,
         on_quit: Callable[[], None],
         on_settings: Optional[Callable[[], None]] = None,
+        on_file_transcribe: Optional[Callable[[], None]] = None,
         gtk_modules=None,
         app_indicator_module=None,
     ) -> None:
@@ -1043,6 +1062,7 @@ class TrayIcon:
 
         self._on_quit = on_quit
         self._on_settings = on_settings
+        self._on_file_transcribe = on_file_transcribe
         self._indicator = None
         self._status_icon = None
         self._menu = None
@@ -1051,6 +1071,14 @@ class TrayIcon:
     def _build_menu(self):
         Gtk = self._Gtk
         menu = Gtk.Menu()
+
+        if self._on_file_transcribe is not None:
+            transcribe_item = Gtk.MenuItem(label="Transcribe file...")
+            transcribe_item.connect(
+                "activate", lambda *_: self._on_file_transcribe()
+            )
+            transcribe_item.show()
+            menu.append(transcribe_item)
 
         if self._on_settings is not None:
             settings_item = Gtk.MenuItem(label="Settings")
@@ -1095,7 +1123,7 @@ class TrayIcon:
             self._status_icon = status_icon
 
         self._built = True
-        logger.info("Tray icon ready (right-click for Settings / Quit)")
+        logger.info("Tray icon ready (right-click for menu)")
 
     def _show_menu(self, icon, button=None, time=None) -> None:
         Gtk = self._Gtk
@@ -1150,6 +1178,7 @@ class PressToTalkApp:
         self._should_quit = False
         self._file_dialog_open = False
         self._gtk = None
+        self._socket_server: Optional[TranscriptionSocketServer] = None
 
     def _idle_add(self, callback: Callable[[], None]) -> None:
         if self._glib is not None:
@@ -1368,6 +1397,9 @@ class PressToTalkApp:
         try:
             self.transcriber.load()
             self._model_ready = True
+            if self._socket_server is None:
+                self._socket_server = TranscriptionSocketServer(self.transcriber)
+            self._socket_server.start()
             self._idle_add(lambda: self.overlay.set_state(OverlayState.IDLE))
         except Exception as exc:
             logger.exception("Failed to load model")
@@ -1392,7 +1424,6 @@ class PressToTalkApp:
                 on_press=self.on_hotkey_press,
                 on_release=self.on_hotkey_release,
                 on_quit=self.request_quit,
-                on_file_transcribe=self.on_file_transcribe,
             )
 
         self.overlay.build()
@@ -1401,6 +1432,7 @@ class PressToTalkApp:
             self.tray = TrayIcon(
                 on_quit=self.request_quit,
                 on_settings=self.open_settings,
+                on_file_transcribe=self.on_file_transcribe,
             )
         self.tray.build()
         self.hotkeys.start()
@@ -1414,6 +1446,8 @@ class PressToTalkApp:
             self.hotkeys.stop()
             if self.recorder.is_recording:
                 self.recorder.stop()
+            if self._socket_server is not None:
+                self._socket_server.stop()
             if self.tray is not None:
                 self.tray.destroy()
 
@@ -1424,6 +1458,107 @@ LOCK_PATH = os.path.join(
     os.environ.get("XDG_RUNTIME_DIR", "/tmp"),
     "press-to-talk.lock",
 )
+TRANSCRIBE_SOCKET_PATH = Path.home() / ".cache" / "press-to-talk" / "transcribe.sock"
+
+
+class TranscriptionSocketServer:
+    """Unix socket so ZapZap (Flatpak) can request transcription from this app."""
+
+    def __init__(self, transcriber: Transcriber) -> None:
+        self._transcriber = transcriber
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._serve, name="ptt-socket", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(0.5)
+                client.connect(str(TRANSCRIBE_SOCKET_PATH))
+                client.sendall(b'{"cmd":"shutdown"}\n')
+        except OSError:
+            pass
+        if self._thread:
+            self._thread.join(timeout=2.0)
+
+    def _serve(self) -> None:
+        import socket as socket_mod
+
+        TRANSCRIBE_SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            TRANSCRIBE_SOCKET_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        server = socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM)
+        server.bind(str(TRANSCRIBE_SOCKET_PATH))
+        server.listen(4)
+        server.settimeout(1.0)
+        logger.info("ZapZap transcription socket: %s", TRANSCRIBE_SOCKET_PATH)
+
+        while not self._stop.is_set():
+            try:
+                conn, _addr = server.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            threading.Thread(
+                target=self._handle_client,
+                args=(conn,),
+                daemon=True,
+            ).start()
+
+        try:
+            server.close()
+        except OSError:
+            pass
+        try:
+            TRANSCRIBE_SOCKET_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _handle_client(self, conn) -> None:
+        import socket as socket_mod
+
+        with conn:
+            data = b""
+            while b"\n" not in data:
+                try:
+                    chunk = conn.recv(65536)
+                except socket_mod.timeout:
+                    break
+                if not chunk:
+                    break
+                data += chunk
+            if not data:
+                return
+            line = data.split(b"\n", 1)[0].decode("utf-8", errors="replace")
+            try:
+                request = json.loads(line)
+                if request.get("cmd") == "shutdown":
+                    return
+                path = request.get("path")
+                if not path or not os.path.isfile(path):
+                    raise ValueError(f"audio file not found: {path!r}")
+                with self._lock:
+                    text = self._transcriber.transcribe_file(path)
+                response = {"text": text, "error": None}
+            except Exception as exc:
+                logger.exception("Socket transcription failed")
+                response = {"text": "", "error": str(exc)}
+            try:
+                conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
+            except OSError:
+                pass
 
 
 def _acquire_lock() -> int | None:
@@ -1456,18 +1591,62 @@ def _acquire_lock() -> int | None:
     return fd
 
 
+def run_transcribe_file(config: AppConfig, path: str) -> int:
+    """Transcribe a single file and print text to stdout (for ZapZap bridge)."""
+    if not os.path.isfile(path):
+        print(f"File not found: {path}", file=sys.stderr)
+        return 1
+    transcriber = Transcriber(config)
+    try:
+        transcriber.load()
+        text = transcriber.transcribe_file(path)
+    except Exception as exc:
+        print(f"Transcription failed: {exc}", file=sys.stderr)
+        return 1
+    print(text)
+    return 0
+
+
+def run_serve(config: AppConfig) -> int:
+    """Headless socket server: load model once, serve transcription requests."""
+    transcriber = Transcriber(config)
+    try:
+        transcriber.load()
+    except Exception as exc:
+        print(f"Model load failed: {exc}", file=sys.stderr)
+        return 1
+    logger.info("Model loaded, starting socket server…")
+    server = TranscriptionSocketServer(transcriber)
+    server._stop = threading.Event()
+
+    def _on_signal(signum, frame):
+        server._stop.set()
+
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+
+    server._serve()
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
     try:
-        config, check_only = parse_args(argv)
+        config, check_only, transcribe_file, serve = parse_args(argv)
     except SystemExit:
         raise
     except ValueError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
+
+    if transcribe_file:
+        return run_transcribe_file(config, transcribe_file)
+
+    if serve:
+        return run_serve(config)
 
     transcriber = Transcriber(config)
     if check_only:

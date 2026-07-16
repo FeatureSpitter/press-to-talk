@@ -9,13 +9,13 @@ Runs in the background with a system tray icon and a small status popup in the b
 ## Features
 
 - **Hotkey recording**: Ctrl+M to start; hold Ctrl while speaking (M can be released)
-- **File transcription**: Ctrl+N to pick an audio file and transcribe it to the clipboard
+- **File transcription**: transcribe audio files from the tray menu
 - **Local transcription**: Whisper model (default `large-v3-turbo`) on NVIDIA CUDA
 - **Clipboard**: transcribed text copied automatically via `xclip`
 - **Auto-paste**: optional Ctrl+V into the focused window after transcription
 - **Settings dialog**: pick recording device, test mic levels, toggle auto-paste
 - **Language detection**: Portuguese and English (auto-detect)
-- **X11 key suppression**: Ctrl+M/N/Q blocked from other apps while the service runs
+- **X11 key suppression**: Ctrl+M/Q blocked from other apps while the service runs
 - **Single instance**: launching again replaces the previous instance
 
 ## Quick install (Linux Mint)
@@ -67,7 +67,7 @@ Or from the **Start Menu** → **Press to Talk**.
 
 ### Transcribe an audio file
 
-1. Press **Ctrl+N** (left or right Ctrl).
+1. Right-click the **tray icon** → **Transcribe file...**
 2. Pick a file in the dialog (wav, mp3, flac, ogg, opus, m4a, wma, aac, webm, mp4, etc.).
 3. Click **Transcribe** → same pipeline as mic recording: transcribe, copy to clipboard, optional auto-paste.
 
@@ -76,8 +76,8 @@ Or from the **Start Menu** → **Press to Talk**.
 | Shortcut | Action |
 |----------|--------|
 | **Ctrl+M** | Start recording (release Ctrl to stop and transcribe) |
-| **Ctrl+N** | Open file picker and transcribe selected audio |
 | **Ctrl+Q** | Quit (while Ctrl is held) |
+| **Tray → Transcribe file...** | Open file picker and transcribe selected audio |
 | **Tray → Settings** | Recording device, mic test, auto-paste |
 | **Tray → Quit** | Exit the app |
 
@@ -99,6 +99,7 @@ If no speech is detected (muted mic, low levels, empty file, etc.), the popup sh
 uv run press_to_talk.py --model large-v3-turbo --device cuda --compute-type float16
 uv run press_to_talk.py --language pt          # force Portuguese
 uv run press_to_talk.py --device cpu           # no GPU
+uv run press_to_talk.py --transcribe-file /path/to/voice.ogg   # stdout only (used by ZapZap patch)
 ```
 
 Disable X11 key suppression:
@@ -128,6 +129,38 @@ Check **System Settings → Sound → Input** (or `pavucontrol`) that the correc
 
 ```bash
 uv run pytest test_press_to_talk.py -v
+```
+
+## ZapZap integration (auto-transcribe voice messages)
+
+If you use [ZapZap](https://flathub.org/apps/com.rtosta.zapzap) for WhatsApp on Linux, you can patch it to transcribe incoming voice messages **inline in the chat** — no manual download, no `.ogg` files in Downloads.
+
+1. Install press-to-talk (`./install.sh`) and ZapZap (`flatpak install flathub com.rtosta.zapzap`).
+2. Run the patch installer:
+
+```bash
+chmod +x install-zapzap-patch.sh
+./install-zapzap-patch.sh
+```
+
+3. **Restart ZapZap** completely (quit from tray, reopen).
+
+4. **Keep Press-to-Talk running** in the tray — ZapZap talks to it via `~/.cache/press-to-talk/transcribe.sock` (Flatpak cannot spawn host GPU jobs directly).
+
+When you open a chat, voice messages show a **spinner** under the bubble while transcribing, then the text appears. Each message is transcribed once; results are cached in `~/.cache/press-to-talk/transcripts/`.
+
+**Debug logs:** `~/.cache/press-to-talk/zapzap.log` (JS + Python events from the patch).
+
+**Re-run `./install-zapzap-patch.sh` after every ZapZap Flatpak update** — updates overwrite patched files.
+
+Optional config at `~/.config/press-to-talk/zapzap.json` if press-to-talk is not in `~/projectos/press-to-talk`:
+
+```json
+{
+  "press_to_talk_dir": "/path/to/press-to-talk",
+  "python": "/path/to/.venv/bin/python",
+  "script": "/path/to/press_to_talk.py"
+}
 ```
 
 ## License

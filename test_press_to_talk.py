@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import socket
 import subprocess
 import threading
 import tempfile
@@ -34,7 +36,7 @@ def config() -> ptt.AppConfig:
 
 @pytest.fixture
 def mock_whisper_model():
-    segment = SimpleNamespace(text=" Olá mundo")
+    segment = SimpleNamespace(text=" Olá mundo", start=0.0, end=2.0)
     model = MagicMock()
     model.transcribe.return_value = ([segment], SimpleNamespace(language="pt"))
     return model
@@ -246,20 +248,22 @@ def mock_pynput_key():
 
 class TestConfig:
     def test_defaults(self):
-        config, check = ptt.parse_args([])
+        config, check, transcribe_file, serve = ptt.parse_args([])
         assert config.model == "large-v3-turbo"
         assert config.device == "cuda"
         assert config.compute_type == "float16"
         assert config.language is None
         assert config.beam_size == 5
         assert check is False
+        assert transcribe_file is None
+        assert serve is False
 
     def test_language_pt(self):
-        config, _ = ptt.parse_args(["--language", "pt"])
+        config, _, _, _ = ptt.parse_args(["--language", "pt"])
         assert config.language == "pt"
 
     def test_language_en(self):
-        config, _ = ptt.parse_args(["--language", "en"])
+        config, _, _, _ = ptt.parse_args(["--language", "en"])
         assert config.language == "en"
 
     def test_invalid_language_rejected(self):
@@ -267,7 +271,7 @@ class TestConfig:
             ptt.parse_args(["--language", "fr"])
 
     def test_custom_model_and_device(self):
-        config, _ = ptt.parse_args(
+        config, _, _, _ = ptt.parse_args(
             ["--model", "large-v3", "--device", "cpu", "--beam-size", "3"]
         )
         assert config.model == "large-v3"
@@ -275,8 +279,17 @@ class TestConfig:
         assert config.beam_size == 3
 
     def test_check_flag(self):
-        _, check = ptt.parse_args(["--check"])
+        _, check, _, _ = ptt.parse_args(["--check"])
         assert check is True
+
+    def test_transcribe_file_flag(self):
+        _, check, path, _ = ptt.parse_args(["--transcribe-file", "/tmp/voice.ogg"])
+        assert check is False
+        assert path == "/tmp/voice.ogg"
+
+    def test_serve_flag(self):
+        _, _, _, serve = ptt.parse_args(["--serve"])
+        assert serve is True
 
     def test_validate_rejects_bad_language(self, config):
         bad = ptt.AppConfig(language="de")
@@ -486,14 +499,26 @@ class TestTranscriber:
 
     def test_transcribe_joins_multiple_segments(self, config):
         segments = [
-            SimpleNamespace(text="Hello "),
-            SimpleNamespace(text="world"),
+            SimpleNamespace(text="Hello ", start=0.0, end=1.0),
+            SimpleNamespace(text="world", start=1.0, end=2.0),
         ]
         model = MagicMock()
         model.transcribe.return_value = (segments, None)
         transcriber = ptt.Transcriber(config, whisper_model=model)
         text = transcriber.transcribe(np.zeros(100, dtype=np.float32))
         assert text == "Hello world"
+
+    def test_transcribe_paragraph_breaks_on_pause(self, config):
+        segments = [
+            SimpleNamespace(text="First part.", start=0.0, end=3.0),
+            SimpleNamespace(text=" Second part.", start=5.0, end=8.0),
+            SimpleNamespace(text=" Still second.", start=8.1, end=10.0),
+        ]
+        model = MagicMock()
+        model.transcribe.return_value = (segments, None)
+        transcriber = ptt.Transcriber(config, whisper_model=model)
+        text = transcriber.transcribe(np.zeros(100, dtype=np.float32))
+        assert text == "First part.\n\nSecond part. Still second."
 
     def test_transcribe_requires_loaded_model(self, config):
         transcriber = ptt.Transcriber(config)
@@ -636,7 +661,7 @@ class TestHotkeyDetector:
         assert len(presses) == 2
         assert len(releases) == 1
 
-    def test_ctrl_n_triggers_file_transcribe(self, mock_pynput_key):
+    def test_ctrl_n_does_not_trigger_file_transcribe(self, mock_pynput_key):
         Key, KeyCode = mock_pynput_key
         file_called = []
 
@@ -653,14 +678,13 @@ class TestHotkeyDetector:
         detector = ptt.HotkeyDetector(
             on_press=lambda: None,
             on_release=lambda: None,
-            on_file_transcribe=lambda: file_called.append(True),
             keyboard_listener_cls=FakeListener,
             key_cls=Key,
             use_x11_grab=False,
         )
         detector.handle_press(Key.ctrl_l)
         detector.handle_press(KeyCode("n"))
-        assert len(file_called) == 1
+        assert file_called == []
 
     def test_ctrl_q_triggers_quit(self, mock_pynput_key):
         Key, KeyCode = mock_pynput_key
@@ -771,9 +795,10 @@ class TestOverlay:
 
 
 class TestTrayIcon:
-    def test_quit_menu_item_calls_callback(self):
+    def test_tray_menu_items_call_callbacks(self):
         quit_called = []
         settings_called = []
+        transcribe_called = []
 
         class FakeMenuItem:
             def __init__(self, label=""):
@@ -821,13 +846,17 @@ class TestTrayIcon:
         tray = ptt.TrayIcon(
             on_quit=lambda: quit_called.append(True),
             on_settings=lambda: settings_called.append(True),
+            on_file_transcribe=lambda: transcribe_called.append(True),
             gtk_modules=(FakeGtk, FakeIndicator),
         )
         tray.build()
-        settings_item = tray._menu.items[0]
-        quit_item = tray._menu.items[1]
+        transcribe_item = tray._menu.items[0]
+        settings_item = tray._menu.items[1]
+        quit_item = tray._menu.items[2]
+        transcribe_item._handler(transcribe_item)
         settings_item._handler(settings_item)
         quit_item._handler(quit_item)
+        assert transcribe_called == [True]
         assert settings_called == [True]
         assert quit_called == [True]
 
@@ -1090,6 +1119,44 @@ class TestPressToTalkApp:
 
 
 SAMPLE_RATE = ptt.SAMPLE_RATE
+
+
+class TestTranscriptionSocketServer:
+    def test_socket_transcribes_file(self, tmp_path):
+        audio = tmp_path / "voice.ogg"
+        audio.write_bytes(b"fake")
+
+        transcriber = MagicMock()
+        transcriber.transcribe_file.return_value = "hello world"
+
+        sock_path = tmp_path / "transcribe.sock"
+        server = ptt.TranscriptionSocketServer(transcriber)
+        original = ptt.TRANSCRIBE_SOCKET_PATH
+        ptt.TRANSCRIBE_SOCKET_PATH = sock_path
+        try:
+            server.start()
+            import time
+
+            for _ in range(50):
+                if sock_path.exists():
+                    break
+                time.sleep(0.02)
+
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(2.0)
+                client.connect(str(sock_path))
+                client.sendall(json.dumps({"path": str(audio)}).encode() + b"\n")
+                data = b""
+                while b"\n" not in data:
+                    data += client.recv(4096)
+                response = json.loads(data.decode().strip())
+
+            assert response["error"] is None
+            assert response["text"] == "hello world"
+            transcriber.transcribe_file.assert_called_once_with(str(audio))
+        finally:
+            server.stop()
+            ptt.TRANSCRIBE_SOCKET_PATH = original
 
 
 # ---------------------------------------------------------------------------
