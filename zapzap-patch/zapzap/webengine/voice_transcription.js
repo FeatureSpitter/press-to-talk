@@ -61,6 +61,9 @@
                 border-radius: 6px;
                 padding: 6px 10px;
             }
+            .ptt-transcript--out {
+                background: rgba(0, 92, 75, 0.35);
+            }
             .ptt-spinner {
                 width: 14px;
                 height: 14px;
@@ -161,6 +164,8 @@
             box.textContent = text;
         } else {
             box.classList.add("ptt-transcript--text");
+            const isOut = !!row.querySelector('[class*="message-out"]');
+            if (isOut) box.classList.add("ptt-transcript--out");
             box.textContent = text;
         }
 
