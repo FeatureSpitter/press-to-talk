@@ -47,6 +47,9 @@
                 overflow-wrap: break-word;
                 white-space: pre-wrap;
                 box-sizing: border-box;
+                user-select: text;
+                -webkit-user-select: text;
+                cursor: text;
             }
             .ptt-transcript--loading {
                 color: #8696a0;
