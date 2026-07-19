@@ -82,6 +82,22 @@
             }
         `;
         document.head.appendChild(style);
+
+        // Ensure Ctrl+C works for selected transcript text
+        document.addEventListener("copy", (e) => {
+            const sel = window.getSelection();
+            if (!sel || sel.isCollapsed) return;
+            const anchor = sel.anchorNode;
+            if (anchor && anchor.closest && anchor.closest(".ptt-transcript")) {
+                e.stopImmediatePropagation();
+                e.clipboardData.setData("text/plain", sel.toString());
+                e.preventDefault();
+            } else if (anchor && anchor.parentElement && anchor.parentElement.closest && anchor.parentElement.closest(".ptt-transcript")) {
+                e.stopImmediatePropagation();
+                e.clipboardData.setData("text/plain", sel.toString());
+                e.preventDefault();
+            }
+        }, true);
     }
 
     function isVoiceMessageRow(row) {
