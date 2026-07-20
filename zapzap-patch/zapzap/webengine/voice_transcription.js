@@ -103,10 +103,15 @@
     const REJECTED = new Set();
 
     function isVoiceMessageRow(row) {
-        if (!row.querySelector("canvas")) return false;
         const msgId = row.getAttribute("data-id");
         if (msgId && REJECTED.has(msgId)) return false;
-        return true;
+        const canvases = row.querySelectorAll("canvas");
+        for (const c of canvases) {
+            const w = c.width || c.offsetWidth;
+            const h = c.height || c.offsetHeight;
+            if (w > 0 && h > 0 && w / h >= 3) return true;
+        }
+        return false;
     }
 
     function findVoiceRows() {
