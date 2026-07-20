@@ -101,9 +101,16 @@
     }
 
     function isVoiceMessageRow(row) {
-        if (row.querySelector("canvas")) {
-            return true;
-        }
+        // Voice messages have a canvas (waveform) alongside a play button and duration text.
+        // Stickers/GIFs also use canvas but lack the audio player chrome.
+        const canvas = row.querySelector("canvas");
+        if (!canvas) return false;
+        const bubble = canvas.closest('[class*="message-"]') || canvas.parentElement;
+        // Voice messages have a play button (▶) rendered as a <button> or <span role="button">
+        if (bubble.querySelector('button[aria-label], span[role="button"][aria-label]')) return true;
+        // Also check for the duration text pattern (e.g. "0:24")
+        const text = bubble.textContent || "";
+        if (/\d+:\d{2}/.test(text)) return true;
         return false;
     }
 
