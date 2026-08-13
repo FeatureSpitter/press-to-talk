@@ -24,7 +24,11 @@ fi
 
 ZAPZAP_ROOT="$(flatpak info --show-location "$APP_ID")/files/lib/python3.13/site-packages/zapzap"
 
-if [[ ! -d "$ZAPZAP_ROOT/webengine" ]]; then
+if [[ -d "$ZAPZAP_ROOT/features/browser/web" ]]; then
+    PATCH_LAYOUT="7"
+elif [[ -d "$ZAPZAP_ROOT/webengine" ]]; then
+    PATCH_LAYOUT="6"
+else
     echo "Unexpected ZapZap layout at $ZAPZAP_ROOT" >&2
     exit 1
 fi
@@ -45,15 +49,27 @@ fi
 echo "Granting flatpak-spawn --host permission…"
 flatpak override --user --talk-name=org.freedesktop.Flatpak "$APP_ID"
 
-echo "Installing patch into $ZAPZAP_ROOT"
+echo "Installing patch into $ZAPZAP_ROOT (layout v$PATCH_LAYOUT)"
 echo "Press-to-Talk dir: $PTT_DIR"
 
-sudo cp "$PATCH_DIR/zapzap/services/VoiceTranscriptionService.py" \
-    "$ZAPZAP_ROOT/services/VoiceTranscriptionService.py"
-sudo cp "$PATCH_DIR/zapzap/webengine/voice_transcription.js" \
-    "$ZAPZAP_ROOT/webengine/voice_transcription.js"
-sudo cp "$PATCH_DIR/zapzap/webengine/WebView.py" \
-    "$ZAPZAP_ROOT/webengine/WebView.py"
+if [[ "$PATCH_LAYOUT" == "7" ]]; then
+    sudo mkdir -p "$ZAPZAP_ROOT/features/voice_transcription"
+    sudo cp "$PATCH_DIR/zapzap/features/voice_transcription/__init__.py" \
+        "$ZAPZAP_ROOT/features/voice_transcription/__init__.py"
+    sudo cp "$PATCH_DIR/zapzap/features/voice_transcription/voice_transcription_service.py" \
+        "$ZAPZAP_ROOT/features/voice_transcription/voice_transcription_service.py"
+    sudo cp "$PATCH_DIR/zapzap/features/browser/web/scripts/voice_transcription.js" \
+        "$ZAPZAP_ROOT/features/browser/web/scripts/voice_transcription.js"
+    sudo cp "$PATCH_DIR/zapzap/features/browser/web/web_view.py" \
+        "$ZAPZAP_ROOT/features/browser/web/web_view.py"
+else
+    sudo cp "$PATCH_DIR/zapzap/services/VoiceTranscriptionService.py" \
+        "$ZAPZAP_ROOT/services/VoiceTranscriptionService.py"
+    sudo cp "$PATCH_DIR/zapzap/webengine/voice_transcription.js" \
+        "$ZAPZAP_ROOT/webengine/voice_transcription.js"
+    sudo cp "$PATCH_DIR/zapzap/webengine/WebView.py" \
+        "$ZAPZAP_ROOT/webengine/WebView.py"
+fi
 
 mkdir -p "$HOME/.config/press-to-talk"
 CONFIG="$HOME/.config/press-to-talk/zapzap.json"
