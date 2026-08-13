@@ -63,7 +63,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
 
     private val store = AppStore(application)
     private val modelStore = ModelStore(application)
-    private val recorder = AudioRecorder()
+    private val recorder = AudioRecorder(application)
 
     private val _state = MutableStateFlow(RecordUiState())
     val state: StateFlow<RecordUiState> = _state.asStateFlow()

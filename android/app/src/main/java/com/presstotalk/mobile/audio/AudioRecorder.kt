@@ -2,9 +2,12 @@ package com.presstotalk.mobile.audio
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Context
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.util.Log
 import androidx.annotation.RequiresPermission
 import com.presstotalk.mobile.asr.SpeechRecognizer
 import com.presstotalk.mobile.asr.VadSegmenter
@@ -28,9 +31,13 @@ import kotlinx.coroutines.isActive
  * requirement that would justify a JNI layer.
  */
 class AudioRecorder(
+    context: Context? = null,
     private val sampleRate: Int = SpeechRecognizer.SAMPLE_RATE,
     private val frameSize: Int = VadSegmenter.WINDOW_SIZE,
 ) {
+
+    private val audioManager: AudioManager? =
+        context?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
 
     class RecorderInitException(message: String) : Exception(message)
 
@@ -74,15 +81,10 @@ class AudioRecorder(
         // drops audio when the reader is late.
         val bufferBytes = maxOf(minBuffer, frameSize * Short.SIZE_BYTES * BUFFER_FRAMES)
 
-        val record = AudioRecord(
-            // VOICE_RECOGNITION skips the aggressive processing applied to
-            // VOICE_COMMUNICATION, which suits a recognizer better than a call.
-            MediaRecorder.AudioSource.VOICE_RECOGNITION,
-            sampleRate,
-            CHANNEL,
-            ENCODING,
-            bufferBytes,
-        )
+        val source = preferredSource()
+        Log.i(TAG, "opening mic: source=${sourceName(source)} buffer=${bufferBytes}B min=$minBuffer")
+
+        val record = AudioRecord(source, sampleRate, CHANNEL, ENCODING, bufferBytes)
         if (record.state != AudioRecord.STATE_INITIALIZED) {
             record.release()
             throw RecorderInitException("AudioRecord failed to initialise")
@@ -90,7 +92,37 @@ class AudioRecorder(
         return record
     }
 
+    /**
+     * Picks the least-processed microphone this device offers.
+     *
+     * VOICE_RECOGNITION still runs noise suppression and gain control that ramp
+     * over roughly the first second, which can hold early speech below the VAD's
+     * threshold - the words are captured but arrive attenuated enough to be
+     * treated as silence, so the opening of a recording goes missing.
+     *
+     * UNPROCESSED is the raw capture path with that chain disabled. It is
+     * optional, so the device is asked before it is used.
+     */
+    private fun preferredSource(): Int {
+        val supportsUnprocessed = audioManager
+            ?.getProperty(AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED)
+            ?.toBoolean() == true
+
+        return if (supportsUnprocessed) {
+            MediaRecorder.AudioSource.UNPROCESSED
+        } else {
+            MediaRecorder.AudioSource.VOICE_RECOGNITION
+        }
+    }
+
+    private fun sourceName(source: Int): String = when (source) {
+        MediaRecorder.AudioSource.UNPROCESSED -> "UNPROCESSED"
+        MediaRecorder.AudioSource.VOICE_RECOGNITION -> "VOICE_RECOGNITION"
+        else -> "source-$source"
+    }
+
     companion object {
+        private const val TAG = "AudioRecorder"
         private const val CHANNEL = AudioFormat.CHANNEL_IN_MONO
         private const val ENCODING = AudioFormat.ENCODING_PCM_16BIT
         private const val BUFFER_FRAMES = 16

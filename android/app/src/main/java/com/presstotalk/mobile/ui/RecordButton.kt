@@ -7,6 +7,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -36,6 +37,7 @@ import kotlin.math.sqrt
 @Composable
 fun RecordButton(
     isRecording: Boolean,
+    isFinishing: Boolean,
     level: Float,
     enabled: Boolean,
     onClick: () -> Unit,
@@ -86,26 +88,40 @@ fun RecordButton(
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 onClick()
             },
-            enabled = enabled,
+            // While the tail is still being transcribed there is nothing useful a
+            // tap could do, so the button stops pretending to be pressable.
+            enabled = enabled && !isFinishing,
             shape = CircleShape,
             color = buttonColor,
             modifier = Modifier
                 .size(BUTTON_SIZE)
                 .semantics {
-                    contentDescription = if (isRecording) "Stop recording" else "Start recording"
+                    contentDescription = when {
+                        isFinishing -> "Finishing transcription"
+                        isRecording -> "Stop recording"
+                        else -> "Start recording"
+                    }
                 },
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    painter = painterResource(
-                        if (isRecording) R.drawable.ic_stop else R.drawable.ic_mic,
-                    ),
-                    contentDescription = null,
-                    tint = if (enabled) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .size(ICON_SIZE)
-                        .alpha(if (enabled) 1f else 0.5f),
-                )
+                if (isFinishing) {
+                    CircularProgressIndicator(
+                        color = Color.White,
+                        strokeWidth = 3.dp,
+                        modifier = Modifier.size(ICON_SIZE),
+                    )
+                } else {
+                    Icon(
+                        painter = painterResource(
+                            if (isRecording) R.drawable.ic_stop else R.drawable.ic_mic,
+                        ),
+                        contentDescription = null,
+                        tint = if (enabled) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .size(ICON_SIZE)
+                            .alpha(if (enabled) 1f else 0.5f),
+                    )
+                }
             }
         }
     }

@@ -143,6 +143,7 @@ fun RecordScreen(viewModel: RecordViewModel) {
 
             RecordButton(
                 isRecording = state.isRecording,
+                isFinishing = state.isFinishing,
                 level = state.level,
                 enabled = state.canRecord || state.isRecording,
                 onClick = {

@@ -22,6 +22,8 @@ class VadSegmenter(
     /** One detected stretch of speech, with its position in the recording. */
     data class Segment(
         val samples: FloatArray,
+        /** Offset into the recording, in samples - lets the caller re-slice with pre-roll. */
+        val startSample: Int,
         val startSeconds: Float,
         val endSeconds: Float,
     ) {
@@ -77,6 +79,7 @@ class VadSegmenter(
             val start = speech.start.toFloat() / sampleRate
             segments += Segment(
                 samples = speech.samples,
+                startSample = speech.start,
                 startSeconds = start,
                 endSeconds = start + speech.samples.size.toFloat() / sampleRate,
             )
@@ -101,9 +104,29 @@ class VadSegmenter(
 
     companion object {
         const val WINDOW_SIZE = 512
-        const val SPEECH_THRESHOLD = 0.5f
-        const val MIN_SILENCE_SECONDS = 0.5f
-        const val MIN_SPEECH_SECONDS = 0.25f
-        const val MAX_SPEECH_SECONDS = 20.0f
+
+        /**
+         * Slightly below the 0.5 default: the live transcript only updates when a
+         * segment closes, and a high threshold makes continuous speech look like
+         * the app has frozen.
+         */
+        const val SPEECH_THRESHOLD = 0.45f
+
+        /**
+         * How much silence closes an utterance. Upstream's 0.25 splits
+         * mid-sentence; 0.5 was too patient - talk without a real pause and the
+         * transcript would not move until the max-duration backstop fired.
+         */
+        const val MIN_SILENCE_SECONDS = 0.35f
+
+        const val MIN_SPEECH_SECONDS = 0.2f
+
+        /**
+         * Backstop for speech with no pause at all, and the worst-case latency of
+         * the live transcript. Lowered from 20s: it directly bounds how long the
+         * screen can sit unchanged while someone is still talking. Still far under
+         * Whisper's 30s ceiling.
+         */
+        const val MAX_SPEECH_SECONDS = 12.0f
     }
 }
