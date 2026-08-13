@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose paints everything; this only needs to be a chrome-free container. -->
+    <style name="Theme.PressToTalk" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

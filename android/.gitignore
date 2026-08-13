@@ -1,0 +1,22 @@
+# Gradle / Android build output
+.gradle/
+build/
+local.properties
+.kotlin/
+captures/
+.idea/
+
+# Large binaries fetched by scripts/fetch-deps.sh - never committed
+app/libs/
+*.aar
+*.onnx
+*.tar.bz2
+
+# Staged bundled-flavor model payload (see scripts/stage-bundled.sh)
+app/src/bundled/assets/models/
+
+# Fetched payloads: models, source tarballs, benchmark clips.
+# Individually large and fully reproducible via scripts/fetch-deps.sh.
+.models/
+.cache/
+.bench/
