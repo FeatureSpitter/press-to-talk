@@ -43,6 +43,8 @@ data class RecordUiState(
     val elapsedSeconds: Float = 0f,
     val level: Float = 0f,
     val modelState: ModelState = ModelState.Loading,
+    /** Only models actually present on this device - see ModelStore.installedModels. */
+    val availableModels: List<String> = emptyList(),
     val history: List<Transcript> = emptyList(),
     val settings: AppSettings = AppSettings(),
     val message: String? = null,
@@ -86,6 +88,11 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
 
     init {
         viewModelScope.launch {
+            val installed = withContext(Dispatchers.IO) {
+                modelStore.installedModels(KNOWN_MODELS)
+            }
+            _state.value = _state.value.copy(availableModels = installed)
+
             combine(store.settings, store.history) { settings, history -> settings to history }
                 .collect { (settings, history) ->
                     _state.value = _state.value.copy(settings = settings, history = history)
@@ -97,6 +104,20 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
     // --- model ---------------------------------------------------------------
 
     private suspend fun ensureRecognizer(settings: AppSettings) {
+        // A stored model name can outlive the model itself - the build changed,
+        // or someone picked one that was never installed. Fall back to something
+        // real and persist it, rather than leaving the app permanently unusable.
+        val installed = _state.value.availableModels
+        if (installed.isNotEmpty() && settings.modelName !in installed) {
+            val fallback = installed.last() // largest available is the most accurate
+            Log.w(TAG, "Model '${settings.modelName}' is not installed; falling back to '$fallback'")
+            store.updateSettings { it.copy(modelName = fallback) }
+            _state.value = _state.value.copy(
+                message = "${settings.modelName} isn't installed - using $fallback",
+            )
+            return // the settings flow re-emits and this runs again with the fallback
+        }
+
         val signature = "${settings.modelName}/${settings.languageMode}/${settings.numThreads}"
         if (signature == loadedSignature && recognizer?.isLoaded == true) return
         if (_state.value.isRecording) return // never swap the model mid-recording
@@ -266,5 +287,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
 
     private companion object {
         const val TAG = "RecordViewModel"
+        /** Everything the app knows how to load; the picker shows the subset present. */
+        val KNOWN_MODELS = listOf("tiny", "base", "small")
     }
 }

@@ -26,28 +26,35 @@ if [[ "${1:-}" == "--clear" ]]; then
     exit 0
 fi
 
-MODEL="${1:-small}"
-SOURCE="$MODELS_DIR/$MODEL"
-
-[[ -d "$SOURCE" ]] || die "Model '$MODEL' not in .models/. Run: scripts/fetch-deps.sh $MODEL"
 [[ -f "$MODELS_DIR/silero_vad.onnx" ]] || die "silero_vad.onnx missing. Run: scripts/fetch-deps.sh"
 
-# Only one model at a time: two would double an already large APK, and
-# ModelStore extracts whatever is present.
-info "Staging '$MODEL' into the bundled flavor"
-rm -rf "$ASSETS_DIR"
-mkdir -p "$ASSETS_DIR/$MODEL"
-
-cp "$MODELS_DIR/silero_vad.onnx" "$ASSETS_DIR/silero_vad.onnx"
-cp "$SOURCE/$MODEL-encoder.int8.onnx" "$ASSETS_DIR/$MODEL/"
-cp "$SOURCE/$MODEL-decoder.int8.onnx" "$ASSETS_DIR/$MODEL/"
-cp "$SOURCE/$MODEL-tokens.txt" "$ASSETS_DIR/$MODEL/"
-
-info "Staged $(du -sh "$ASSETS_DIR" | cut -f1). Now build:"
-echo "  ./gradlew assembleBundledRelease"
-echo
-echo "Note: the app's default model is 'small' (AppSettings.DEFAULT_MODEL)."
-if [[ "$MODEL" != "small" ]]; then
-    printf '\033[1;33mwarning:\033[0m staged "%s" but the app asks for "small" by default;\n' "$MODEL"
-    printf '         change it in Settings on first run, or update DEFAULT_MODEL.\n'
+# All three by default, so the Settings picker is a real choice on any phone
+# rather than a list of things that are not installed.
+models=("$@")
+if [[ ${#models[@]} -eq 0 ]]; then
+    models=(tiny base small)
 fi
+
+rm -rf "$ASSETS_DIR"
+mkdir -p "$ASSETS_DIR"
+cp "$MODELS_DIR/silero_vad.onnx" "$ASSETS_DIR/silero_vad.onnx"
+
+for model in "${models[@]}"; do
+    source_dir="$MODELS_DIR/$model"
+    [[ -d "$source_dir" ]] || die "Model '$model' not in .models/. Run: scripts/fetch-deps.sh $model"
+
+    info "Staging '$model'"
+    mkdir -p "$ASSETS_DIR/$model"
+    cp "$source_dir/$model-encoder.int8.onnx" "$ASSETS_DIR/$model/"
+    cp "$source_dir/$model-decoder.int8.onnx" "$ASSETS_DIR/$model/"
+    cp "$source_dir/$model-tokens.txt" "$ASSETS_DIR/$model/"
+done
+
+DEFAULT_MODEL="small"   # keep in step with AppSettings.DEFAULT_MODEL
+if [[ ! " ${models[*]} " =~ " $DEFAULT_MODEL " ]]; then
+    printf '\033[1;33mwarning:\033[0m the app defaults to "%s", which is not staged.\n' "$DEFAULT_MODEL"
+    printf '         It will fall back to whichever model is present on first run.\n'
+fi
+
+info "Staged $(du -sh "$ASSETS_DIR" | cut -f1) (${models[*]}). Now build:"
+echo "  ./gradlew assembleBundledRelease"

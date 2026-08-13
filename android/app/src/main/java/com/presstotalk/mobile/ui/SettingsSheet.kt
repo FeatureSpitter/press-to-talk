@@ -9,19 +9,23 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.presstotalk.mobile.asr.LanguageMode
 import com.presstotalk.mobile.data.AppSettings
@@ -31,6 +35,7 @@ import com.presstotalk.mobile.data.HistoryPolicy
 @Composable
 fun SettingsSheet(
     settings: AppSettings,
+    availableModels: List<String>,
     onUpdate: ((AppSettings) -> AppSettings) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -96,18 +101,85 @@ fun SettingsSheet(
             Spacer(Modifier.height(24.dp))
 
             SettingLabel("Model")
-            SettingHint("Larger is more accurate and slower. Reloads on change.")
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                MODELS.forEachIndexed { index, model ->
-                    SegmentedButton(
-                        selected = settings.modelName == model,
-                        onClick = { onUpdate { it.copy(modelName = model) } },
-                        shape = SegmentedButtonDefaults.itemShape(index, MODELS.size),
-                    ) { Text(model) }
+            val installed = ModelCatalog.installed(availableModels)
+            if (installed.isEmpty()) {
+                // Offering a model this build does not carry just breaks the app.
+                SettingHint("No model installed. Add one with scripts/push-model.sh.")
+            } else {
+                SettingHint(
+                    "Speeds measured on this phone. Switching reloads the model, " +
+                        "which takes a couple of seconds.",
+                )
+                installed.forEach { model ->
+                    ModelOption(
+                        model = model,
+                        selected = settings.modelName == model.name,
+                        onSelect = { onUpdate { it.copy(modelName = model.name) } },
+                    )
+                    Spacer(Modifier.height(8.dp))
                 }
             }
 
             Spacer(Modifier.height(32.dp))
+        }
+    }
+}
+
+/**
+ * One model, with the numbers you need to choose between them: how long a real
+ * recording takes, how accurate it is, and what it costs on disk.
+ */
+@Composable
+private fun ModelOption(
+    model: ModelInfo,
+    selected: Boolean,
+    onSelect: () -> Unit,
+) {
+    Surface(
+        onClick = onSelect,
+        shape = MaterialTheme.shapes.medium,
+        color = if (selected) {
+            MaterialTheme.colorScheme.secondaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .selectable(selected = selected, role = Role.RadioButton, onClick = onSelect),
+    ) {
+        Row(modifier = Modifier.padding(12.dp)) {
+            RadioButton(selected = selected, onClick = null)
+            Spacer(Modifier.padding(horizontal = 4.dp))
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(model.name, style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.padding(horizontal = 4.dp))
+                    Text(
+                        "· ${model.accuracy} · ${model.size}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (model.recommended) {
+                        Spacer(Modifier.padding(horizontal = 4.dp))
+                        Text(
+                            "RECOMMENDED",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+                Text(
+                    model.speed,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    model.detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }
@@ -145,5 +217,3 @@ private fun SliderRow(
         Text(valueLabel, style = MaterialTheme.typography.labelLarge)
     }
 }
-
-private val MODELS = listOf("tiny", "base", "small")

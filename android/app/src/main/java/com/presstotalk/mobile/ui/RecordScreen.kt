@@ -97,6 +97,7 @@ fun RecordScreen(viewModel: RecordViewModel) {
     if (showSettings) {
         SettingsSheet(
             settings = state.settings,
+            availableModels = state.availableModels,
             onUpdate = viewModel::updateSettings,
             onDismiss = { showSettings = false },
         )

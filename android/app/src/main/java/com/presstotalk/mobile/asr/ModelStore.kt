@@ -63,8 +63,17 @@ class ModelStore(private val context: Context) {
         )
     }
 
-    /** Non-throwing probe, for the UI to show a useful empty state. */
-    fun isAvailable(modelName: String): Boolean = runCatching { prepare(modelName) }.isSuccess
+    /**
+     * Which of [candidates] this install can actually load.
+     *
+     * Deliberately side-effect free - unlike [prepare] it never extracts - so
+     * the settings UI can only ever offer models that are really present. A
+     * picker that lists a model the build does not carry just breaks the app.
+     */
+    fun installedModels(candidates: List<String>): List<String> = candidates.filter { name ->
+        bundlesModel(name) ||
+            listOfNotNull(internalDir, externalDir).any { pathsIn(it, name) != null }
+    }
 
     /** Per-file readability, so the log says which file is the problem. */
     private fun describe(root: File, modelName: String): String =
