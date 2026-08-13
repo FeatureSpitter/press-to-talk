@@ -263,6 +263,14 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
 
     // --- settings ------------------------------------------------------------
 
+    fun deleteTranscript(id: String) {
+        viewModelScope.launch { store.deleteTranscript(id) }
+    }
+
+    fun clearHistory() {
+        viewModelScope.launch { store.clearHistory() }
+    }
+
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
         viewModelScope.launch { store.updateSettings(transform) }
     }

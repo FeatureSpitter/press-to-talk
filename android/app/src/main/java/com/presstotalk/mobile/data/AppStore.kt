@@ -56,6 +56,19 @@ class AppStore(private val context: Context) {
         }
     }
 
+    suspend fun deleteTranscript(id: String) {
+        context.dataStore.edit { prefs ->
+            val existing = decode(prefs[HISTORY_KEY], emptyList<Transcript>()) {
+                json.decodeFromString<List<Transcript>>(it)
+            }
+            prefs[HISTORY_KEY] = json.encodeToString(HistoryPolicy.remove(existing, id))
+        }
+    }
+
+    suspend fun clearHistory() {
+        context.dataStore.edit { prefs -> prefs[HISTORY_KEY] = json.encodeToString(emptyList<Transcript>()) }
+    }
+
     suspend fun updateSettings(transform: (AppSettings) -> AppSettings) {
         context.dataStore.edit { prefs ->
             val current = decode(prefs[SETTINGS_KEY], AppSettings()) {

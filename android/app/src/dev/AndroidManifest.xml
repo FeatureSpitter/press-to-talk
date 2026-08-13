@@ -7,5 +7,11 @@
             android:exported="true"
             android:excludeFromRecents="true"
             android:noHistory="true" />
+        <!-- Replays a WAV through the VAD with no microphone, to test segmentation. -->
+        <activity
+            android:name="com.presstotalk.mobile.bench.VadReplayActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true" />
     </application>
 </manifest>

@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -137,7 +138,12 @@ fun RecordScreen(viewModel: RecordViewModel) {
                             body = (state.modelState as ModelState.Failed).message,
                         )
                     state.isRecording || state.isFinishing -> LiveTranscript(state)
-                    else -> IdleContent(history = state.history, onCopy = copy)
+                    else -> IdleContent(
+                        history = state.history,
+                        onCopy = copy,
+                        onDelete = viewModel::deleteTranscript,
+                        onClearAll = viewModel::clearHistory,
+                    )
                 }
             }
 
@@ -291,7 +297,12 @@ private fun LiveTranscript(state: RecordUiState) {
 }
 
 @Composable
-private fun IdleContent(history: List<Transcript>, onCopy: (String) -> Unit) {
+private fun IdleContent(
+    history: List<Transcript>,
+    onCopy: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onClearAll: () -> Unit,
+) {
     if (history.isEmpty()) {
         Column(
             modifier = Modifier.fillMaxSize().padding(32.dp),
@@ -311,25 +322,53 @@ private fun IdleContent(history: List<Transcript>, onCopy: (String) -> Unit) {
 
     val latest = history.first()
     val earlier = history.drop(1)
+    var confirmClearAll by remember { mutableStateOf(false) }
+
+    if (confirmClearAll) {
+        AlertDialog(
+            onDismissRequest = { confirmClearAll = false },
+            title = { Text("Delete all transcripts?") },
+            text = { Text("All ${history.size} transcripts will be removed. This cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmClearAll = false
+                        onClearAll()
+                    },
+                ) { Text("Delete all") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClearAll = false }) { Text("Cancel") }
+            },
+        )
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        item { LatestTranscriptCard(latest, onCopy) }
+        item { LatestTranscriptCard(latest, onCopy, onDelete) }
 
         if (earlier.isNotEmpty()) {
             item {
-                Text(
-                    "Earlier",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp, bottom = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Earlier",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = { confirmClearAll = true }) { Text("Clear all") }
+                }
             }
             items(earlier, key = { it.id }) { transcript ->
-                HistoryRow(transcript, onCopy)
+                HistoryRow(transcript, onCopy, onDelete)
             }
         }
     }
@@ -342,18 +381,36 @@ private fun IdleContent(history: List<Transcript>, onCopy: (String) -> Unit) {
  * primary button rather than the small icon the older entries carry.
  */
 @Composable
-private fun LatestTranscriptCard(transcript: Transcript, onCopy: (String) -> Unit) {
+private fun LatestTranscriptCard(
+    transcript: Transcript,
+    onCopy: (String) -> Unit,
+    onDelete: (String) -> Unit,
+) {
     OutlinedCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(transcript.text, style = MaterialTheme.typography.bodyLarge)
             Spacer(Modifier.height(16.dp))
-            Button(
-                onClick = { onCopy(transcript.text) },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Icon(painterResource(R.drawable.ic_copy), contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.size(8.dp))
-                Text("Copy")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    onClick = { onCopy(transcript.text) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(
+                        painterResource(R.drawable.ic_copy),
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.size(8.dp))
+                    Text("Copy")
+                }
+                IconButton(onClick = { onDelete(transcript.id) }) {
+                    Icon(
+                        painterResource(R.drawable.ic_delete),
+                        contentDescription = "Delete transcript",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
             }
             Spacer(Modifier.height(8.dp))
             Text(
@@ -366,7 +423,11 @@ private fun LatestTranscriptCard(transcript: Transcript, onCopy: (String) -> Uni
 }
 
 @Composable
-private fun HistoryRow(transcript: Transcript, onCopy: (String) -> Unit) {
+private fun HistoryRow(
+    transcript: Transcript,
+    onCopy: (String) -> Unit,
+    onDelete: (String) -> Unit,
+) {
     Surface(
         shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -393,6 +454,14 @@ private fun HistoryRow(transcript: Transcript, onCopy: (String) -> Unit) {
                 Icon(
                     painterResource(R.drawable.ic_copy),
                     contentDescription = "Copy transcript",
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            IconButton(onClick = { onDelete(transcript.id) }) {
+                Icon(
+                    painterResource(R.drawable.ic_delete),
+                    contentDescription = "Delete transcript",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
                 )
             }

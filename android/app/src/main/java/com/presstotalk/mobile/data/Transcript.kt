@@ -36,4 +36,7 @@ object HistoryPolicy {
 
     fun add(existing: List<Transcript>, transcript: Transcript, cap: Int): List<Transcript> =
         applyCap(listOf(transcript) + existing, cap)
+
+    fun remove(existing: List<Transcript>, id: String): List<Transcript> =
+        existing.filterNot { it.id == id }
 }

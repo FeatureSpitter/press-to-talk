@@ -132,6 +132,66 @@ class RecordingPipeline(
             }
         }
 
+        // Per-frame levels, used to choose a quiet place to cut long speech.
+        val frameLevels = ArrayList<Float>()
+
+        /** Samples already handed to recognition; nothing before this is re-sent. */
+        var emittedThrough = 0
+
+        /**
+         * Sends [from]..[to] for recognition, clipped so audio is never sent
+         * twice. VAD segments and our own forced cuts overlap by design - the
+         * VAD eventually reports the whole utterance including the part already
+         * transcribed - so every emission goes through here.
+         */
+        suspend fun emitRange(from: Int, to: Int) {
+            var start = max(from, emittedThrough)
+            val end = min(to, buffer.size)
+            if (end - start < MIN_EMIT_SAMPLES) return
+
+            // Hard guard against Whisper's 30s ceiling. sherpa-onnx does not
+            // report going over it - it truncates and logs a warning - so an
+            // oversized chunk would silently lose its tail.
+            if (end - start > MAX_DECODE_SAMPLES) {
+                Log.w(
+                    TAG,
+                    "chunk of %.1fs exceeds the decoder limit; keeping the last %.1fs".format(
+                        (end - start).toFloat() / SpeechRecognizer.SAMPLE_RATE,
+                        MAX_DECODE_SAMPLES.toFloat() / SpeechRecognizer.SAMPLE_RATE,
+                    ),
+                )
+                start = end - MAX_DECODE_SAMPLES
+            }
+
+            pending.send(
+                VadSegmenter.Segment(
+                    samples = buffer.slice(start, end),
+                    startSample = start,
+                    startSeconds = start.toFloat() / SpeechRecognizer.SAMPLE_RATE,
+                    endSeconds = end.toFloat() / SpeechRecognizer.SAMPLE_RATE,
+                ),
+            )
+            emittedThrough = end
+        }
+
+        /**
+         * Quietest frame boundary within the last [CUT_SEARCH_SAMPLES], so a
+         * forced cut lands in a breath or a gap between words rather than
+         * through the middle of one.
+         */
+        fun quietestBoundaryBefore(end: Int): Int {
+            val searchStart = max(emittedThrough, end - CUT_SEARCH_SAMPLES)
+            val firstFrame = searchStart / VadSegmenter.WINDOW_SIZE
+            val lastFrame = min(frameLevels.size, end / VadSegmenter.WINDOW_SIZE)
+            if (lastFrame <= firstFrame) return end
+
+            var quietest = firstFrame
+            for (i in firstFrame until lastFrame) {
+                if (frameLevels[i] < frameLevels[quietest]) quietest = i
+            }
+            return (quietest + 1) * VadSegmenter.WINDOW_SIZE
+        }
+
         segmenter.reset()
         var samplesRead = 0L
         val maxSamples = (maxDurationSeconds * SpeechRecognizer.SAMPLE_RATE).toLong()
@@ -140,24 +200,6 @@ class RecordingPipeline(
         val openedAt = System.nanoTime()
         var firstFrameLogged = false
         var loudestOpening = 0f
-
-        /**
-         * Re-cuts a VAD segment against our own buffer, adding padding either
-         * side. VAD only starts a segment once speech is confidently above
-         * threshold, so the attack of the first word lands *before* its reported
-         * start and would otherwise be thrown away.
-         */
-        fun widen(segment: VadSegmenter.Segment): VadSegmenter.Segment {
-            val from = max(0, segment.startSample - PRE_ROLL_SAMPLES)
-            val to = min(buffer.size, segment.startSample + segment.samples.size + POST_ROLL_SAMPLES)
-            val samples = buffer.slice(from, to)
-            return segment.copy(
-                samples = samples,
-                startSample = from,
-                startSeconds = from.toFloat() / SpeechRecognizer.SAMPLE_RATE,
-                endSeconds = to.toFloat() / SpeechRecognizer.SAMPLE_RATE,
-            )
-        }
 
         try {
             recorder.frames().collect { frame ->
@@ -171,6 +213,7 @@ class RecordingPipeline(
                 samplesRead += frame.size
 
                 val rms = AudioRecorder.rms(frame)
+                frameLevels += rms
 
                 // Distinguishes a microphone that is still warming up (level near
                 // zero while the user is already talking) from a VAD that is
@@ -195,7 +238,39 @@ class RecordingPipeline(
                     ),
                 )
 
-                segmenter.drain().forEach { pending.send(widen(it)) }
+                segmenter.drain().forEach { segment ->
+                    emitRange(
+                        segment.startSample - PRE_ROLL_SAMPLES,
+                        segment.startSample + segment.samples.size + POST_ROLL_SAMPLES,
+                    )
+                }
+
+                // Continuous speech never closes a VAD segment - measured: a 16.7s
+                // clip produced nothing at all until flush, and maxSpeechDuration
+                // does not hard-cut, it only raises the threshold and waits for a
+                // quiet moment that may never arrive. Without cutting for
+                // ourselves the transcript stays empty while the user is talking.
+                if (buffer.size - emittedThrough >= LIVE_CHUNK_SAMPLES) {
+                    if (segmenter.isSpeechDetected()) {
+                        val cut = quietestBoundaryBefore(buffer.size)
+                        if (cut > emittedThrough) {
+                            Log.d(
+                                TAG,
+                                "forced cut at %.2fs (%.2fs of unsent speech)".format(
+                                    cut.toFloat() / SpeechRecognizer.SAMPLE_RATE,
+                                    (buffer.size - emittedThrough).toFloat() / SpeechRecognizer.SAMPLE_RATE,
+                                ),
+                            )
+                            emitRange(emittedThrough, cut)
+                        }
+                    } else {
+                        // Only silence is pending. Decoding it would waste a
+                        // Whisper pass, and letting it pile up would eventually be
+                        // prepended to real speech and push the chunk past the
+                        // decoder limit. Drop it, keeping enough for the next onset.
+                        emittedThrough = max(emittedThrough, buffer.size - PRE_ROLL_SAMPLES)
+                    }
+                }
 
                 hitCap = samplesRead >= maxSamples
                 if (hitCap || shouldStop()) {
@@ -211,7 +286,15 @@ class RecordingPipeline(
             runCatching { segmenter.flush() }
                 .onFailure { Log.e(TAG, "VAD flush failed", it) }
                 .getOrDefault(emptyList())
-                .forEach { pending.send(widen(it)) }
+                .forEach { segment ->
+                    emitRange(
+                        segment.startSample - PRE_ROLL_SAMPLES,
+                        segment.startSample + segment.samples.size + POST_ROLL_SAMPLES,
+                    )
+                }
+            // Anything after the last VAD segment (trailing speech it never
+            // closed) would otherwise be dropped.
+            emitRange(emittedThrough, buffer.size)
             pending.close()
         }
 
@@ -232,5 +315,24 @@ class RecordingPipeline(
 
         /** How much of the opening to profile when diagnosing lost speech. */
         val OPENING_DIAGNOSTIC_SAMPLES = 4 * SpeechRecognizer.SAMPLE_RATE
+
+        /**
+         * Longest run of unsent audio before the pipeline cuts for itself.
+         * Bounds how long the live transcript can sit unchanged; also roughly
+         * the decode size, so it trades latency against per-chunk context.
+         */
+        val LIVE_CHUNK_SAMPLES = (7.0f * SpeechRecognizer.SAMPLE_RATE).toInt()
+
+        /** Window searched for a quiet frame when forcing a cut. */
+        val CUT_SEARCH_SAMPLES = (0.7f * SpeechRecognizer.SAMPLE_RATE).toInt()
+
+        /** Below this, a slice is not worth a decode. */
+        val MIN_EMIT_SAMPLES = (0.3f * SpeechRecognizer.SAMPLE_RATE).toInt()
+
+        /**
+         * Whisper's encoder cannot see past 30s and sherpa-onnx truncates
+         * silently rather than erroring, so chunks are kept safely under it.
+         */
+        val MAX_DECODE_SAMPLES = (25f * SpeechRecognizer.SAMPLE_RATE).toInt()
     }
 }
