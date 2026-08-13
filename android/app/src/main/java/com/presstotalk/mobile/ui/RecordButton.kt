@@ -67,6 +67,10 @@ fun RecordButton(
 
     val buttonColor by animateColorAsState(
         targetValue = when {
+            // Red means "live, capturing you". Once capture has stopped and only
+            // transcription is left, that is no longer true, so it returns to the
+            // resting colour rather than implying the mic is still open.
+            isFinishing -> MaterialTheme.colorScheme.primary
             !enabled -> MaterialTheme.colorScheme.surfaceVariant
             isRecording -> recordingAccent
             else -> MaterialTheme.colorScheme.primary
@@ -79,7 +83,8 @@ fun RecordButton(
         modifier = modifier.size(TOUCH_AREA),
         contentAlignment = Alignment.Center,
     ) {
-        if (isRecording) {
+        // The halo tracks the microphone, so it goes with it when capture ends.
+        if (isRecording && !isFinishing) {
             AmplitudeRing(scale = ringScale, color = recordingAccent)
         }
 
