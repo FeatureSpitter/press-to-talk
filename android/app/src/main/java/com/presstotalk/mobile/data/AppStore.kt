@@ -69,6 +69,15 @@ class AppStore(private val context: Context) {
         context.dataStore.edit { prefs -> prefs[HISTORY_KEY] = json.encodeToString(emptyList<Transcript>()) }
     }
 
+    /** The SAF tree URI granted for browsing WhatsApp voice notes, if any. */
+    val whatsAppFolderUri: Flow<String?> = context.dataStore.data.map { prefs -> prefs[WHATSAPP_FOLDER_URI_KEY] }
+
+    suspend fun setWhatsAppFolderUri(uri: String?) {
+        context.dataStore.edit { prefs ->
+            if (uri == null) prefs.remove(WHATSAPP_FOLDER_URI_KEY) else prefs[WHATSAPP_FOLDER_URI_KEY] = uri
+        }
+    }
+
     suspend fun updateSettings(transform: (AppSettings) -> AppSettings) {
         context.dataStore.edit { prefs ->
             val current = decode(prefs[SETTINGS_KEY], AppSettings()) {
@@ -100,5 +109,6 @@ class AppStore(private val context: Context) {
         const val TAG = "AppStore"
         val SETTINGS_KEY: Preferences.Key<String> = stringPreferencesKey("settings")
         val HISTORY_KEY: Preferences.Key<String> = stringPreferencesKey("history")
+        val WHATSAPP_FOLDER_URI_KEY: Preferences.Key<String> = stringPreferencesKey("whatsapp_folder_uri")
     }
 }

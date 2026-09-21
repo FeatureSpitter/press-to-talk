@@ -13,5 +13,11 @@
             android:exported="true"
             android:excludeFromRecents="true"
             android:noHistory="true" />
+        <!-- Smoke test for the file transcription pipeline (decoder + VAD + Whisper). -->
+        <activity
+            android:name="com.presstotalk.mobile.bench.FileTranscribeTestActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true" />
     </application>
 </manifest>

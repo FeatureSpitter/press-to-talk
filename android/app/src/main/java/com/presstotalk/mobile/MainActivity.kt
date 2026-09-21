@@ -9,7 +9,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.presstotalk.mobile.ui.RecordScreen
+import com.presstotalk.mobile.ui.AppNavigation
 import com.presstotalk.mobile.ui.RecordViewModel
 import com.presstotalk.mobile.ui.theme.PressToTalkTheme
 
@@ -32,7 +32,7 @@ class MainActivity : ComponentActivity() {
                     onDispose { view.keepScreenOn = false }
                 }
 
-                RecordScreen(viewModel)
+                AppNavigation(viewModel)
             }
         }
     }

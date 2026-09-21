@@ -33,6 +33,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Scaffold
@@ -60,6 +61,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.presstotalk.mobile.R
+import com.presstotalk.mobile.asr.ModelState
 import com.presstotalk.mobile.data.Transcript
 import com.presstotalk.mobile.ui.theme.recordingAccent
 import kotlinx.coroutines.launch
@@ -102,6 +104,15 @@ fun RecordScreen(viewModel: RecordViewModel) {
             onUpdate = viewModel::updateSettings,
             onDismiss = { showSettings = false },
         )
+    }
+
+    // --- open audio file -----------------------------------------------------
+    val openFile = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            viewModel.transcribeFile(uri, displayName = uri.lastPathSegment)
+        }
     }
 
     Scaffold(
@@ -147,11 +158,18 @@ fun RecordScreen(viewModel: RecordViewModel) {
                 }
             }
 
+            if (state.isTranscribingFile) {
+                FileProgressBar(
+                    progress = state.fileProgress,
+                    fileName = state.transcribingFileName,
+                )
+            }
+
             RecordButton(
                 isRecording = state.isRecording,
                 isFinishing = state.isFinishing,
                 level = state.level,
-                enabled = state.canRecord || state.isRecording,
+                enabled = (state.canRecord || state.isRecording) && !state.isTranscribingFile,
                 onClick = {
                     if (permissionGranted) {
                         viewModel.toggleRecording()
@@ -163,7 +181,56 @@ fun RecordScreen(viewModel: RecordViewModel) {
                     .align(Alignment.CenterHorizontally)
                     .padding(bottom = 12.dp),
             )
+
+            Row(
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .padding(bottom = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Transcribe an audio file",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.size(8.dp))
+                IconButton(
+                    onClick = { openFile.launch(arrayOf("audio/*")) },
+                    enabled = state.canRecord && !state.isTranscribingFile && !state.isRecording,
+                ) {
+                    Icon(
+                        painterResource(R.drawable.ic_file_open),
+                        contentDescription = "Open audio file",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
         }
+    }
+}
+
+/** Inline progress while a picked file is decoded and transcribed. */
+@Composable
+private fun FileProgressBar(progress: Float, fileName: String?) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 32.dp, vertical = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            fileName?.let { "Transcribing $it" } ?: "Transcribing…",
+            style = MaterialTheme.typography.labelMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(6.dp))
+        LinearProgressIndicator(
+            progress = { progress.coerceIn(0f, 1f) },
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 
@@ -518,6 +585,7 @@ private fun Transcript.subtitle(): String {
         append(stamp)
         append(" · ")
         append(formatDuration(durationMs / 1000f))
+        sourceLabel?.let { append(" · ").append(it) }
         language?.let { append(" · ").append(it) }
         if (interrupted) append(" · interrupted")
     }

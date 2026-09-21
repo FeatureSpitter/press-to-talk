@@ -12,7 +12,18 @@ data class Transcript(
     val language: String? = null,
     /** True when recording was cut short by the app going to the background. */
     val interrupted: Boolean = false,
+    /** Where the audio came from: mic, a picked file, or a WhatsApp voice note. */
+    val source: TranscriptSource = TranscriptSource.MIC,
+    /** Human-readable origin, e.g. a file name, for non-mic transcripts. */
+    val sourceLabel: String? = null,
 )
+
+@Serializable
+enum class TranscriptSource {
+    MIC,
+    FILE,
+    WHATSAPP,
+}
 
 /**
  * The history's retention rule, kept separate from storage so it can be tested

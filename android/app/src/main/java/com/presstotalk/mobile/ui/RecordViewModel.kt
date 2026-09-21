@@ -2,21 +2,23 @@ package com.presstotalk.mobile.ui
 
 import android.Manifest
 import android.app.Application
+import android.net.Uri
 import android.util.Log
 import androidx.annotation.RequiresPermission
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.presstotalk.mobile.asr.ModelStore
+import com.presstotalk.mobile.asr.FileTranscriptionPipeline
+import com.presstotalk.mobile.asr.ModelState
 import com.presstotalk.mobile.asr.RecordingPipeline
-import com.presstotalk.mobile.asr.SpeechRecognizer
+import com.presstotalk.mobile.asr.SpeechEngine
 import com.presstotalk.mobile.asr.TranscriptFormatter
 import com.presstotalk.mobile.asr.Utterance
-import com.presstotalk.mobile.asr.VadSegmenter
-import com.presstotalk.mobile.asr.WhisperRecognizer
+import com.presstotalk.mobile.audio.AudioDecoder
 import com.presstotalk.mobile.audio.AudioRecorder
 import com.presstotalk.mobile.data.AppSettings
 import com.presstotalk.mobile.data.AppStore
 import com.presstotalk.mobile.data.Transcript
+import com.presstotalk.mobile.data.TranscriptSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,14 +29,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
-sealed interface ModelState {
-    data object Loading : ModelState
-    data object Ready : ModelState
-    /** No model on disk - actionable, with instructions. */
-    data class Missing(val message: String) : ModelState
-    data class Failed(val message: String) : ModelState
-}
-
 data class RecordUiState(
     val isRecording: Boolean = false,
     /** Stop was requested; the trailing utterance is still being recognised. */
@@ -43,11 +37,19 @@ data class RecordUiState(
     val elapsedSeconds: Float = 0f,
     val level: Float = 0f,
     val modelState: ModelState = ModelState.Loading,
-    /** Only models actually present on this device - see ModelStore.installedModels. */
+    /** Only models actually present on this device - see SpeechEngine.availableModels. */
     val availableModels: List<String> = emptyList(),
     val history: List<Transcript> = emptyList(),
     val settings: AppSettings = AppSettings(),
     val message: String? = null,
+
+    // --- file transcription --------------------------------------------------
+    /** A picked audio file is being decoded + transcribed. */
+    val isTranscribingFile: Boolean = false,
+    /** 0..1 across decode + recognition, for the inline progress bar. */
+    val fileProgress: Float = 0f,
+    /** Name of the file being transcribed, shown next to the progress. */
+    val transcribingFileName: String? = null,
 ) {
     val canRecord: Boolean get() = modelState is ModelState.Ready && !isFinishing
     val remainingSeconds: Float get() = (settings.maxRecordingSeconds - elapsedSeconds).coerceAtLeast(0f)
@@ -62,19 +64,15 @@ data class RecordUiState(
 class RecordViewModel(application: Application) : AndroidViewModel(application) {
 
     private val store = AppStore(application)
-    private val modelStore = ModelStore(application)
+    private val engine = SpeechEngine(application)
     private val recorder = AudioRecorder(application)
+    private val decoder = AudioDecoder(application)
 
     private val _state = MutableStateFlow(RecordUiState())
     val state: StateFlow<RecordUiState> = _state.asStateFlow()
 
-    private var recognizer: SpeechRecognizer? = null
-    private var segmenter: VadSegmenter? = null
-
-    /** Identifies the loaded model so settings changes can force a reload. */
-    private var loadedSignature: String? = null
-
     private var recordingJob: Job? = null
+    private var fileJob: Job? = null
 
     /**
      * Stopping goes through this rather than cancelling [recordingJob]: a
@@ -88,67 +86,14 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
 
     init {
         viewModelScope.launch {
-            val installed = withContext(Dispatchers.IO) {
-                modelStore.installedModels(KNOWN_MODELS)
-            }
-            _state.value = _state.value.copy(availableModels = installed)
+            _state.value = _state.value.copy(availableModels = engine.availableModels)
 
             combine(store.settings, store.history) { settings, history -> settings to history }
                 .collect { (settings, history) ->
                     _state.value = _state.value.copy(settings = settings, history = history)
-                    ensureRecognizer(settings)
+                    engine.ensure(settings)
+                    _state.value = _state.value.copy(modelState = engine.state)
                 }
-        }
-    }
-
-    // --- model ---------------------------------------------------------------
-
-    private suspend fun ensureRecognizer(settings: AppSettings) {
-        // A stored model name can outlive the model itself - the build changed,
-        // or someone picked one that was never installed. Fall back to something
-        // real and persist it, rather than leaving the app permanently unusable.
-        val installed = _state.value.availableModels
-        if (installed.isNotEmpty() && settings.modelName !in installed) {
-            val fallback = installed.last() // largest available is the most accurate
-            Log.w(TAG, "Model '${settings.modelName}' is not installed; falling back to '$fallback'")
-            store.updateSettings { it.copy(modelName = fallback) }
-            _state.value = _state.value.copy(
-                message = "${settings.modelName} isn't installed - using $fallback",
-            )
-            return // the settings flow re-emits and this runs again with the fallback
-        }
-
-        val signature = "${settings.modelName}/${settings.languageMode}/${settings.numThreads}"
-        if (signature == loadedSignature && recognizer?.isLoaded == true) return
-        if (_state.value.isRecording) return // never swap the model mid-recording
-
-        _state.value = _state.value.copy(modelState = ModelState.Loading)
-
-        withContext(Dispatchers.IO) {
-            releaseEngines()
-            try {
-                val paths = modelStore.prepare(settings.modelName)
-                val whisper = WhisperRecognizer(
-                    paths = paths,
-                    languageMode = settings.languageMode,
-                    numThreads = settings.numThreads,
-                )
-                whisper.load()
-                recognizer = whisper
-                segmenter = VadSegmenter(paths.vad)
-                loadedSignature = signature
-                _state.value = _state.value.copy(modelState = ModelState.Ready)
-            } catch (missing: ModelStore.ModelMissingException) {
-                Log.w(TAG, "Model '${settings.modelName}' unavailable: ${missing.message}")
-                _state.value = _state.value.copy(
-                    modelState = ModelState.Missing(missing.message ?: "Model not found"),
-                )
-            } catch (failure: Exception) {
-                Log.e(TAG, "Failed to load model '${settings.modelName}'", failure)
-                _state.value = _state.value.copy(
-                    modelState = ModelState.Failed(failure.message ?: failure.toString()),
-                )
-            }
         }
     }
 
@@ -161,9 +106,9 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun startRecording() {
-        val engine = recognizer
-        val vad = segmenter
-        if (engine == null || vad == null || !_state.value.canRecord) return
+        val engineRec = engine.recognizer
+        val vad = engine.segmenter
+        if (engineRec == null || vad == null || !_state.value.canRecord) return
         if (recordingJob?.isActive == true) return
 
         stopRequested = false
@@ -182,7 +127,7 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         val utterances = mutableListOf<Utterance>()
 
         recordingJob = viewModelScope.launch {
-            val pipeline = RecordingPipeline(recorder, vad, engine)
+            val pipeline = RecordingPipeline(recorder, vad, engineRec)
             try {
                 pipeline.run(settings.maxRecordingSeconds) { stopRequested }.collect { event ->
                     when (event) {
@@ -261,6 +206,96 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
+    // --- file transcription --------------------------------------------------
+
+    /**
+     * Decodes [uri] and transcribes it with the same engine as the mic, saving
+     * the result to history. Reusable by the WhatsApp screen via [transcribeSamples].
+     */
+    fun transcribeFile(
+        uri: Uri,
+        displayName: String? = null,
+        source: TranscriptSource = TranscriptSource.FILE,
+    ) {
+        if (_state.value.isTranscribingFile) return
+        val engineRec = engine.recognizer
+        val vad = engine.segmenter
+        if (engineRec == null || vad == null || _state.value.modelState !is ModelState.Ready) {
+            _state.value = _state.value.copy(message = "Wait for the model to load first")
+            return
+        }
+
+        _state.value = _state.value.copy(
+            isTranscribingFile = true,
+            fileProgress = 0f,
+            transcribingFileName = displayName,
+            message = null,
+        )
+        fileJob = viewModelScope.launch {
+            try {
+                val samples = withContext(Dispatchers.IO) {
+                    _state.value = _state.value.copy(fileProgress = 0.05f)
+                    decoder.decode(uri)
+                }
+                transcribeSamples(
+                    samples = samples,
+                    durationMs = (samples.size.toLong() / 16_000L) * 1000L,
+                    source = source,
+                    sourceLabel = displayName,
+                )
+            } catch (failure: Exception) {
+                Log.e(TAG, "File transcription failed", failure)
+                _state.value = _state.value.copy(message = failure.message ?: "Could not transcribe this file")
+            } finally {
+                _state.value = _state.value.copy(isTranscribingFile = false, fileProgress = 0f, transcribingFileName = null)
+            }
+        }
+    }
+
+    /** Shared by the file picker and the WhatsApp browser. */
+    suspend fun transcribeSamples(
+        samples: FloatArray,
+        durationMs: Long,
+        source: TranscriptSource,
+        sourceLabel: String? = null,
+    ) {
+        val engineRec = engine.recognizer ?: return
+        val vad = engine.segmenter ?: return
+        if (samples.isEmpty()) {
+            _state.value = _state.value.copy(message = "This file contained no audio")
+            return
+        }
+
+        val pipeline = FileTranscriptionPipeline(vad, engineRec)
+        val utterances = mutableListOf<Utterance>()
+        withContext(Dispatchers.Default) {
+            pipeline.transcribe(samples).collect { event ->
+                when (event) {
+                    is FileTranscriptionPipeline.Event.Progress ->
+                        _state.value = _state.value.copy(fileProgress = event.fraction)
+                    is FileTranscriptionPipeline.Event.Text -> utterances += event.utterance
+                }
+            }
+        }
+
+        val text = TranscriptFormatter.join(utterances)
+        if (text.isBlank()) {
+            _state.value = _state.value.copy(message = "No speech detected in this file")
+            return
+        }
+        store.addTranscript(
+            Transcript(
+                id = UUID.randomUUID().toString(),
+                createdAt = System.currentTimeMillis(),
+                text = text,
+                durationMs = durationMs,
+                language = utterances.firstNotNullOfOrNull { it.language },
+                source = source,
+                sourceLabel = sourceLabel,
+            ),
+        )
+    }
+
     // --- settings ------------------------------------------------------------
 
     fun deleteTranscript(id: String) {
@@ -279,23 +314,14 @@ class RecordViewModel(application: Application) : AndroidViewModel(application) 
         _state.value = _state.value.copy(message = null)
     }
 
-    private fun releaseEngines() {
-        runCatching { recognizer?.close() }
-        runCatching { segmenter?.close() }
-        recognizer = null
-        segmenter = null
-        loadedSignature = null
-    }
-
     override fun onCleared() {
         recordingJob?.cancel()
-        releaseEngines()
+        fileJob?.cancel()
+        engine.close()
         super.onCleared()
     }
 
     private companion object {
         const val TAG = "RecordViewModel"
-        /** Everything the app knows how to load; the picker shows the subset present. */
-        val KNOWN_MODELS = listOf("tiny", "base", "small")
     }
 }
