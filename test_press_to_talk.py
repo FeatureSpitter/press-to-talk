@@ -470,6 +470,37 @@ class TestTranscriber:
                 compute_type="float16",
             )
 
+    def test_load_falls_back_to_cpu_on_cuda_oom(self, config):
+        cpu_model = MagicMock()
+
+        def factory(*_args, **kwargs):
+            if kwargs.get("device") == "cuda":
+                raise RuntimeError("CUDA failed with error out of memory")
+            return cpu_model
+
+        with patch("faster_whisper.WhisperModel", side_effect=factory) as whisper_cls:
+            transcriber = ptt.Transcriber(config)
+            transcriber.load()
+
+        assert transcriber._model is cpu_model
+        assert whisper_cls.call_count == 2
+        _, cpu_kwargs = whisper_cls.call_args_list[1]
+        assert cpu_kwargs["device"] == "cpu"
+        assert cpu_kwargs["compute_type"] == "int8"
+
+    def test_load_does_not_fallback_on_other_errors(self, config):
+        with patch(
+            "faster_whisper.WhisperModel",
+            side_effect=RuntimeError("bad model path"),
+        ):
+            transcriber = ptt.Transcriber(config)
+            with pytest.raises(RuntimeError, match="bad model path"):
+                transcriber.load()
+
+    def test_is_cuda_oom(self):
+        assert ptt.is_cuda_oom(RuntimeError("CUDA failed with error out of memory"))
+        assert not ptt.is_cuda_oom(RuntimeError("bad model path"))
+
     def test_transcribe_empty_audio(self, config, mock_whisper_model):
         transcriber = ptt.Transcriber(config, whisper_model=mock_whisper_model)
         assert transcriber.transcribe(np.array([], dtype=np.float32)) == ""

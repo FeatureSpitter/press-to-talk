@@ -43,6 +43,7 @@ CHANNELS = 1
 DEFAULT_MODEL = "large-v3-turbo"
 DEFAULT_DEVICE = "cuda"
 DEFAULT_COMPUTE_TYPE = "float16"
+CPU_FALLBACK_COMPUTE_TYPE = "int8"
 DEFAULT_BEAM_SIZE = 5
 VALID_LANGUAGES = {"en", "pt"}
 MIN_RECORDING_SECONDS = 0.05
@@ -328,23 +329,46 @@ class MicLevelMonitor:
             self._level = 0.0
 
 
+def is_cuda_oom(exc: BaseException) -> bool:
+    return "out of memory" in str(exc).lower()
+
+
 class Transcriber:
     """Wrap faster-whisper with accuracy-focused defaults."""
 
     def __init__(self, config: AppConfig, whisper_model=None) -> None:
         self.config = config
         self._model = whisper_model
+        self._load_lock = threading.Lock()
 
-    def load(self) -> None:
-        if self._model is not None:
-            return
+    def _open_model(self, device: str, compute_type: str):
         from faster_whisper import WhisperModel
 
-        self._model = WhisperModel(
+        return WhisperModel(
             self.config.model,
-            device=self.config.device,
-            compute_type=self.config.compute_type,
+            device=device,
+            compute_type=compute_type,
         )
+
+    def load(self) -> None:
+        with self._load_lock:
+            if self._model is not None:
+                return
+            try:
+                self._model = self._open_model(
+                    self.config.device,
+                    self.config.compute_type,
+                )
+                return
+            except Exception as exc:
+                if self.config.device == "cpu" or not is_cuda_oom(exc):
+                    raise
+                logger.warning(
+                    "CUDA OOM loading %s; falling back to CPU",
+                    self.config.model,
+                )
+            self._model = self._open_model("cpu", CPU_FALLBACK_COMPUTE_TYPE)
+            logger.info("Loaded %s on CPU (%s)", self.config.model, CPU_FALLBACK_COMPUTE_TYPE)
 
     @property
     def is_loaded(self) -> bool:
@@ -1550,6 +1574,7 @@ class TranscriptionSocketServer:
                 if not path or not os.path.isfile(path):
                     raise ValueError(f"audio file not found: {path!r}")
                 with self._lock:
+                    self._transcriber.load()
                     text = self._transcriber.transcribe_file(path)
                 response = {"text": text, "error": None}
             except Exception as exc:
@@ -1608,23 +1633,23 @@ def run_transcribe_file(config: AppConfig, path: str) -> int:
 
 
 def run_serve(config: AppConfig) -> int:
-    """Headless socket server: load model once, serve transcription requests."""
+    """Bind the ZapZap socket first; load the model in the background."""
     transcriber = Transcriber(config)
-    try:
-        transcriber.load()
-    except Exception as exc:
-        print(f"Model load failed: {exc}", file=sys.stderr)
-        return 1
-    logger.info("Model loaded, starting socket server…")
     server = TranscriptionSocketServer(transcriber)
-    server._stop = threading.Event()
 
     def _on_signal(signum, frame):
         server._stop.set()
 
+    def _load_or_log() -> None:
+        try:
+            transcriber.load()
+        except Exception:
+            logger.exception("Background model load failed")
+
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
-
+    threading.Thread(target=_load_or_log, name="ptt-model-load", daemon=True).start()
+    logger.info("ZapZap socket binding; model loads in background")
     server._serve()
     return 0
 

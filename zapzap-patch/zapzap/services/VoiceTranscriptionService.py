@@ -47,6 +47,28 @@ def _write_log(message: str) -> None:
         handle.write(f"{stamp} {message}\n")
 
 
+def _socket_is_listening(sock_path: Path) -> bool:
+    if not sock_path.exists():
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(0.5)
+            client.connect(str(sock_path))
+        return True
+    except OSError:
+        return False
+
+
+def _remove_dead_socket(sock_path: Path) -> None:
+    if not sock_path.exists() or _socket_is_listening(sock_path):
+        return
+    try:
+        sock_path.unlink()
+        _write_log(f"removed stale socket {sock_path}")
+    except OSError as exc:
+        _write_log(f"stale socket not removed: {exc}")
+
+
 class VoiceTranscriptionService(QObject):
     """Download voice blobs from WA Web JS, transcribe on host, cache by message id."""
 
@@ -158,7 +180,8 @@ class VoiceTranscriptionService(QObject):
     def _ensure_server(self) -> None:
         """Auto-spawn a persistent --serve process on the host if not already running."""
         sock_path = SOCKET_PATH
-        if sock_path.exists():
+        _remove_dead_socket(sock_path)
+        if _socket_is_listening(sock_path):
             return
         if VoiceTranscriptionService._server_spawning:
             import time
@@ -202,7 +225,12 @@ class VoiceTranscriptionService(QObject):
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.settimeout(600)
-                client.connect(str(sock_path))
+                try:
+                    client.connect(str(sock_path))
+                except OSError as exc:
+                    _remove_dead_socket(sock_path)
+                    _write_log(f"socket failed ({exc}), using subprocess")
+                    return None
                 client.sendall(payload.encode("utf-8"))
                 data = b""
                 while b"\n" not in data:
