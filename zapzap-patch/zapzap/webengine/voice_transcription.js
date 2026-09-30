@@ -277,17 +277,60 @@
         return btoa(binary);
     }
 
+    function pttMimetype(msg) {
+        // Encrypted notes arrive as application/octet-stream. WhatsApp rejects
+        // that content type for media type ptt; the real type is on the message.
+        const declared = typeof msg.mimetype === "string" ? msg.mimetype.trim() : "";
+        const base = declared.split(";")[0].toLowerCase();
+        if (base && base !== "application/octet-stream") return declared;
+        return "audio/ogg; codecs=opus";
+    }
+
+    async function arrayBufferFromBlob(blob) {
+        if (!blob) return null;
+        const concrete = typeof blob.forceToBlob === "function" ? blob.forceToBlob() : blob;
+        if (concrete && typeof concrete.arrayBuffer === "function") {
+            return concrete.arrayBuffer();
+        }
+        return null;
+    }
+
+    function cachedVoiceBlob(msg) {
+        try {
+            const cache = require("WAWebMediaInMemoryBlobCache").InMemoryMediaBlobCache;
+            const filehash = msg.mediaObject?.filehash || msg.filehash;
+            if (filehash && cache && typeof cache.get === "function") {
+                const cached = cache.get(filehash);
+                if (cached) return cached;
+            }
+        } catch (err) {
+            log(`blob cache unavailable: ${err}`);
+        }
+        return msg.mediaObject?.mediaBlob || null;
+    }
+
     async function downloadVoiceAudio(msg) {
         if (!msg || !isAudioType(msg.type)) return null;
         if (!msg.mediaData) return null;
         if (msg.mediaData.mediaStage === "REUPLOADING") return null;
 
-        if (msg.mediaData.mediaStage !== "RESOLVED" && typeof msg.downloadMedia === "function") {
-            await msg.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 });
+        const mimetype = pttMimetype(msg);
+        if (msg.mimetype !== mimetype) msg.mimetype = mimetype;
+
+        if (typeof msg.downloadMedia === "function") {
+            try {
+                await msg.downloadMedia({
+                    downloadEvenIfExpensive: true,
+                    rmrReason: 1,
+                    isUserInitiated: true,
+                });
+            } catch (err) {
+                log(`downloadMedia failed: ${err}`);
+            }
         }
 
-        const stage = msg.mediaData.mediaStage || "";
-        if (stage.includes("ERROR") || stage === "FETCHING") return null;
+        const fromCache = await arrayBufferFromBlob(cachedVoiceBlob(msg));
+        if (fromCache) return fromCache;
 
         const mockQpl = {
             addAnnotations() { return this; },
@@ -303,6 +346,7 @@
             mediaKey: msg.mediaKey,
             mediaKeyTimestamp: msg.mediaKeyTimestamp,
             type: msg.type,
+            mimetype,
             signal: new AbortController().signal,
             downloadQpl: mockQpl,
         });
